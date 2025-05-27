@@ -16,4 +16,6 @@ void extract_file(ad1_session* session, ad1_item_header* item, const char* outpu
 
 void apply_metadata(const char* item_path, ad1_metadata* metadata);
 
+void handle_fs_error(int errn, const char* complete_path);
+
 #endif

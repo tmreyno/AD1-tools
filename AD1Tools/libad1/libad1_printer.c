@@ -79,9 +79,7 @@ print_tree(ad1_item_header* local_root_header, int cur_depth_level) {
         printf("    ");
     }
 
-    if (i < cur_depth_level) {
-        printf("└───");
-    }
+    printf("└───");
 
     printf("%s\n", local_root_header->item_name);
     if (local_root_header->first_child_addr != 0) {

@@ -17,19 +17,7 @@ extract_all(ad1_session* session, const char* output_dir) {
     printf("Extracting files\n");
 
     if (mkdir(output_dir, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) == -1) {
-        switch (errno) {
-            case EACCES: printf("You don't have access to %s.", output_dir); return;
-            case ELOOP: printf("Symlink loop on %s.\n", output_dir); return;
-            case EMLINK: printf("Link count exceeds max link count.\n"); return;
-            case EEXIST: break;
-            case ENAMETOOLONG:
-                printf("Path length exceeds %d or a compondent length exceeds %d\n.", PATH_MAX, NAME_MAX);
-                return;
-            case ENOENT: printf("Parent path does not exists.\n"); return;
-            case ENOTDIR: printf("Parent path not a directory.\n"); return;
-            case EROFS: printf("Filesystem is read-only.\n"); return;
-            case ENOSPC: printf("Not enough space on the filesystem to create directory.\n"); return;
-        }
+        handle_fs_error(errno, output_dir);
     }
 
     extract_file(session, session->logical_header->first_item, output_dir);
@@ -64,21 +52,7 @@ extract_file(ad1_session* session, ad1_item_header* item, const char* output_dir
             free(complete_path);
             complete_path = NULL;
 
-            printf("Errno mkdir : %d\n", errno);
-
-            switch (errno) {
-                case EACCES: printf("You don't have access to %s.\n", complete_path); break;
-                case ELOOP: printf("Symlink loop on %s.\n", complete_path); break;
-                case EMLINK: printf("Link count exceeds max link count for path %s.\n", complete_path); break;
-                case EEXIST: break;
-                case ENAMETOOLONG:
-                    printf("Path length exceeds %d or a compondent length exceeds %d\n.", PATH_MAX, NAME_MAX);
-                    break;
-                case ENOENT: printf("Parent path for %s does not exists.\n", item->item_name); break;
-                case ENOTDIR: printf("Parent path for %s not a directory.\n", item->item_name); break;
-                case EROFS: printf("Filesystem is read-only.\n"); break;
-                case ENOSPC: printf("Not enough space on the filesystem to create directory.\n"); break;
-            }
+            handle_fs_error(errno, complete_path);
 
             return;
         }
@@ -95,11 +69,8 @@ extract_file(ad1_session* session, ad1_item_header* item, const char* output_dir
 
             fclose(output_file);
         } else {
-            printf("Errno : %d\n", errno);
-            printf("Couldn't create file : %s\n", complete_path);
+            handle_fs_error(errno, complete_path);
         }
-
-        //free(file_data);
     }
 
     if (item->first_child != NULL) {
@@ -118,6 +89,25 @@ extract_file(ad1_session* session, ad1_item_header* item, const char* output_dir
 
     free(complete_path);
     complete_path = NULL;
+}
+
+void
+handle_fs_error(int errn, const char* complete_path) {
+    switch (errno) {
+        case EACCES: printf("You don't have access to %s.\n", complete_path); break;
+        case ELOOP: printf("Symlink loop on %s.\n", complete_path); break;
+        case EMLINK: printf("Link count exceeds max link count for path %s.\n", complete_path); break;
+        case EEXIST: break;
+        case ENAMETOOLONG:
+            printf("Path length exceeds %d or a compondent length exceeds %d\n.", PATH_MAX, NAME_MAX);
+            break;
+        case ENOENT: printf("Parent path for %s does not exists.\n", complete_path); break;
+        case ENOTDIR: printf("Parent path for %s not a directory.\n", complete_path); break;
+        case EROFS: printf("Filesystem is read-only.\n"); break;
+        case ENOSPC: printf("Not enough space on the filesystem to create directory.\n"); break;
+    }
+    printf("Errno : %d\n", errno);
+    printf("Couldn't create file : %s\n", complete_path);
 }
 
 void
