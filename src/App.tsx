@@ -36,6 +36,13 @@ type VerifyEntry = {
   status: string;
 };
 
+type DiscoveredFile = {
+  path: string;
+  filename: string;
+  container_type: string;
+  size: number;
+};
+
 type Ad1Info = {
   segment: SegmentHeader;
   logical: LogicalHeader;
@@ -64,12 +71,14 @@ const defaultStatus: StatusState = {
 function App() {
   const [inputPath, setInputPath] = createSignal("");
   const [outputDir, setOutputDir] = createSignal("");
+  const [scanDir, setScanDir] = createSignal("");
   const [includeTree, setIncludeTree] = createSignal(true);
   const [info, setInfo] = createSignal<ContainerInfo | null>(null);
   const [tree, setTree] = createSignal<TreeEntry[]>([]);
   const [treeFilter, setTreeFilter] = createSignal("");
   const [verifyResults, setVerifyResults] = createSignal<VerifyEntry[]>([]);
   const [verifyFilter, setVerifyFilter] = createSignal("");
+  const [discoveredFiles, setDiscoveredFiles] = createSignal<DiscoveredFile[]>([]);
   const [status, setStatus] = createSignal<StatusState>(defaultStatus);
   const [busy, setBusy] = createSignal(false);
 
@@ -179,6 +188,28 @@ function App() {
     }
   };
 
+  const scanForFiles = async () => {
+    if (!scanDir().trim()) {
+      setError("Add a directory path to scan.");
+      return;
+    }
+    setWorking("Scanning directory for forensic files");
+    try {
+      const result = await invoke<DiscoveredFile[]>("scan_directory", {
+        dir_path: scanDir(),
+      });
+      setDiscoveredFiles(result);
+      setOk(`Found ${result.length} forensic container file(s)`);
+    } catch (err) {
+      setError(normalizeError(err));
+    }
+  };
+
+  const selectDiscoveredFile = (file: DiscoveredFile) => {
+    setInputPath(file.path);
+    setOk(`Selected: ${file.filename}`);
+  };
+
   return (
     <div class="app">
       <header class="hero">
@@ -223,6 +254,21 @@ function App() {
               />
               <span>Include tree in info scan</span>
             </label>
+          </section>
+
+          <section class="card">
+            <h2>Directory Scan</h2>
+            <label class="field">
+              <span>Directory to scan</span>
+              <input
+                value={scanDir()}
+                onInput={(event) => setScanDir(event.currentTarget.value)}
+                placeholder="/path/to/directory"
+              />
+            </label>
+            <button disabled={busy()} onClick={scanForFiles} class="accent">
+              Scan for Files
+            </button>
           </section>
 
           <section class="card actions">
@@ -343,6 +389,31 @@ function App() {
                   )}
                 </Show>
               )}
+            </Show>
+          </section>
+
+          <section class="card">
+            <h2>Discovered Files</h2>
+            <Show
+              when={discoveredFiles().length > 0}
+              fallback={<p class="muted">Scan a directory to find forensic container files.</p>}
+            >
+              <ul class="list">
+                <For each={discoveredFiles()}>
+                  {(file) => (
+                    <li 
+                      class="clickable" 
+                      onClick={() => selectDiscoveredFile(file)}
+                      title={file.path}
+                    >
+                      <span class="dot file" />
+                      <span class="path">{file.filename}</span>
+                      <span class="size">{file.container_type}</span>
+                      <span class="size">{formatBytes(file.size)}</span>
+                    </li>
+                  )}
+                </For>
+              </ul>
             </Show>
           </section>
 

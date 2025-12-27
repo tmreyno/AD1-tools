@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::fs;
 use std::path::Path;
 
 use crate::ad1;
@@ -8,6 +9,14 @@ pub struct ContainerInfo {
     pub container: String,
     pub ad1: Option<ad1::Ad1Info>,
     pub note: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DiscoveredFile {
+    pub path: String,
+    pub filename: String,
+    pub container_type: String,
+    pub size: u64,
 }
 
 enum ContainerKind {
@@ -64,4 +73,79 @@ fn detect_container(path: &str) -> Result<ContainerKind, String> {
     }
 
     Err("Unsupported or unrecognized logical container.".to_string())
+}
+
+pub fn scan_directory(dir_path: &str) -> Result<Vec<DiscoveredFile>, String> {
+    let path = Path::new(dir_path);
+    if !path.exists() {
+        return Err(format!("Directory not found: {dir_path}"));
+    }
+    if !path.is_dir() {
+        return Err(format!("Path is not a directory: {dir_path}"));
+    }
+
+    let mut discovered = Vec::new();
+
+    let entries = fs::read_dir(path)
+        .map_err(|e| format!("Failed to read directory: {e}"))?;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let entry_path = entry.path();
+        if !entry_path.is_file() {
+            continue;
+        }
+
+        let path_str = match entry_path.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let filename = entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+
+        let lower = filename.to_lowercase();
+        
+        // Check for forensic container files
+        let container_type = if lower.ends_with(".ad1") || lower.ends_with(".ad2") || lower.ends_with(".ad3") {
+            // Verify it's actually an AD1 file
+            match ad1::is_ad1(path_str) {
+                Ok(true) => Some("AD1"),
+                _ => None,
+            }
+        } else if lower.ends_with(".l01") {
+            Some("L01")
+        } else if lower.ends_with(".lx01") {
+            Some("Lx01")
+        } else if lower.ends_with(".e01") {
+            Some("E01")
+        } else if lower.ends_with(".ex01") {
+            Some("Ex01")
+        } else if lower.ends_with(".aff") || lower.ends_with(".afd") {
+            Some("AFF")
+        } else {
+            None
+        };
+
+        if let Some(ctype) = container_type {
+            let size = entry.metadata()
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            discovered.push(DiscoveredFile {
+                path: path_str.to_string(),
+                filename,
+                container_type: ctype.to_string(),
+                size,
+            });
+        }
+    }
+
+    Ok(discovered)
 }

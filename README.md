@@ -9,6 +9,7 @@ A standalone Tauri + SolidJS desktop app for inspecting AccessData AD1 logical i
 - Verify file hashes (MD5 or SHA1)
 - Extract files with metadata timestamps
 - Detect L01/Lx01 containers (parsing support planned)
+- **Scan directories for forensic container files** (AD1, L01, Lx01, E01, Ex01, AFF)
 
 ## Requirements
 

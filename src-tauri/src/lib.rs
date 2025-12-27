@@ -22,6 +22,11 @@ fn logical_extract(input_path: String, output_dir: String) -> Result<(), String>
     containers::extract(&input_path, &output_dir)
 }
 
+#[tauri::command]
+fn scan_directory(dir_path: String) -> Result<Vec<containers::DiscoveredFile>, String> {
+    containers::scan_directory(&dir_path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -29,7 +34,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             logical_info,
             logical_verify,
-            logical_extract
+            logical_extract,
+            scan_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

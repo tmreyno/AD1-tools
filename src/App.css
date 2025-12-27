@@ -338,6 +338,16 @@ button.ghost {
   background: rgba(140, 26, 26, 0.18);
 }
 
+.list li.clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.list li.clickable:hover {
+  background: rgba(31, 111, 90, 0.15);
+  transform: translateY(-1px);
+}
+
 .dot {
   width: 10px;
   height: 10px;
