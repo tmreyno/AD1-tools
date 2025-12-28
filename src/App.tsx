@@ -1,5 +1,6 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 type SegmentHeader = {
@@ -41,6 +42,7 @@ type DiscoveredFile = {
   filename: string;
   container_type: string;
   size: number;
+  segment_count?: number;
 };
 
 type Ad1Info = {
@@ -50,9 +52,40 @@ type Ad1Info = {
   tree?: TreeEntry[];
 };
 
+type E01Info = {
+  format_version: string;
+  segment_count: number;
+  sector_count: number;
+  bytes_per_sector: number;
+  chunk_count: number;
+  sectors_per_chunk: number;
+  total_size: number;
+  compression: string;
+  case_number?: string;
+  description?: string;
+  examiner_name?: string;
+  evidence_number?: string;
+  notes?: string;
+  acquiry_date?: string;
+  system_date?: string;
+  model?: string;
+  serial_number?: string;
+};
+
+type L01Info = {
+  format_version: number;
+  case_info: string;
+  examiner?: string;
+  description?: string;
+  file_count: number;
+  total_size: number;
+};
+
 type ContainerInfo = {
   container: string;
   ad1?: Ad1Info | null;
+  e01?: E01Info | null;
+  l01?: L01Info | null;
   note?: string | null;
 };
 
@@ -138,8 +171,8 @@ function App() {
     setWorking(include ? "Loading info + tree" : "Loading info");
     try {
       const result = await invoke<ContainerInfo>("logical_info", {
-        input_path: inputPath(),
-        include_tree: include,
+        inputPath: inputPath(),
+        includeTree: include,
       });
       setInfo(result);
       setTree(result.ad1?.tree ?? []);
@@ -157,7 +190,7 @@ function App() {
     setWorking(`Verifying ${algorithm.toUpperCase()}`);
     try {
       const result = await invoke<VerifyEntry[]>("logical_verify", {
-        input_path: inputPath(),
+        inputPath: inputPath(),
         algorithm,
       });
       setVerifyResults(result);
@@ -179,8 +212,8 @@ function App() {
     setWorking("Extracting files");
     try {
       await invoke("logical_extract", {
-        input_path: inputPath(),
-        output_dir: outputDir(),
+        inputPath: inputPath(),
+        outputDir: outputDir(),
       });
       setOk("Extraction complete");
     } catch (err) {
@@ -196,7 +229,7 @@ function App() {
     setWorking("Scanning directory for forensic files");
     try {
       const result = await invoke<DiscoveredFile[]>("scan_directory", {
-        dir_path: scanDir(),
+        dirPath: scanDir(),
       });
       setDiscoveredFiles(result);
       setOk(`Found ${result.length} forensic container file(s)`);
@@ -208,6 +241,64 @@ function App() {
   const selectDiscoveredFile = (file: DiscoveredFile) => {
     setInputPath(file.path);
     setOk(`Selected: ${file.filename}`);
+  };
+
+  const browseInputFile = async () => {
+    try {
+      const selected = await open({
+        title: "Select Input File",
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Forensic Images",
+            extensions: ["ad1", "e01", "l01", "E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08"],
+          },
+          {
+            name: "All Files",
+            extensions: ["*"],
+          },
+        ],
+      });
+      if (selected) {
+        setInputPath(selected);
+        setOk(`Selected: ${selected}`);
+      }
+    } catch (err) {
+      setError(normalizeError(err));
+    }
+  };
+
+  const browseOutputDir = async () => {
+    try {
+      const selected = await open({
+        title: "Select Output Directory",
+        multiple: false,
+        directory: true,
+      });
+      if (selected) {
+        setOutputDir(selected);
+        setOk(`Output directory: ${selected}`);
+      }
+    } catch (err) {
+      setError(normalizeError(err));
+    }
+  };
+
+  const browseScanDir = async () => {
+    try {
+      const selected = await open({
+        title: "Select Directory to Scan",
+        multiple: false,
+        directory: true,
+      });
+      if (selected) {
+        setScanDir(selected);
+        setOk(`Scan directory: ${selected}`);
+      }
+    } catch (err) {
+      setError(normalizeError(err));
+    }
   };
 
   return (
@@ -231,20 +322,30 @@ function App() {
           <section class="card">
             <h2>Inputs</h2>
             <label class="field">
-              <span>AD1 file path</span>
-              <input
-                value={inputPath()}
-                onInput={(event) => setInputPath(event.currentTarget.value)}
-                placeholder="/path/to/image.ad1"
-              />
+              <span>Input file path</span>
+              <div class="input-with-button">
+                <input
+                  value={inputPath()}
+                  onInput={(event) => setInputPath(event.currentTarget.value)}
+                  placeholder="/path/to/image.ad1"
+                />
+                <button onClick={browseInputFile} disabled={busy()} class="browse-btn">
+                  Browse...
+                </button>
+              </div>
             </label>
             <label class="field">
               <span>Output directory</span>
-              <input
-                value={outputDir()}
-                onInput={(event) => setOutputDir(event.currentTarget.value)}
-                placeholder="/path/to/output"
-              />
+              <div class="input-with-button">
+                <input
+                  value={outputDir()}
+                  onInput={(event) => setOutputDir(event.currentTarget.value)}
+                  placeholder="/path/to/output"
+                />
+                <button onClick={browseOutputDir} disabled={busy()} class="browse-btn">
+                  Browse...
+                </button>
+              </div>
             </label>
             <label class="toggle">
               <input
@@ -260,11 +361,16 @@ function App() {
             <h2>Directory Scan</h2>
             <label class="field">
               <span>Directory to scan</span>
-              <input
-                value={scanDir()}
-                onInput={(event) => setScanDir(event.currentTarget.value)}
-                placeholder="/path/to/directory"
-              />
+              <div class="input-with-button">
+                <input
+                  value={scanDir()}
+                  onInput={(event) => setScanDir(event.currentTarget.value)}
+                  placeholder="/path/to/directory"
+                />
+                <button onClick={browseScanDir} disabled={busy()} class="browse-btn">
+                  Browse...
+                </button>
+              </div>
             </label>
             <button disabled={busy()} onClick={scanForFiles} class="accent">
               Scan for Files
@@ -325,69 +431,144 @@ function App() {
             <h2>Image Info</h2>
             <Show when={info()} fallback={<p class="muted">No info loaded.</p>}>
               {(data) => (
-                <Show
-                  when={data().ad1}
-                  fallback={
+                <>
+                  <Show when={data().ad1}>
+                    {(ad1) => (
+                      <div class="info-grid">
+                        <div>
+                          <h3>Segment Header</h3>
+                          <dl>
+                            <InfoRow label="Signature" value={ad1().segment.signature} />
+                            <InfoRow
+                              label="Segment index"
+                              value={ad1().segment.segment_index}
+                            />
+                            <InfoRow
+                              label="Segment count"
+                              value={ad1().segment.segment_number}
+                            />
+                            <InfoRow
+                              label="Fragments size"
+                              value={ad1().segment.fragments_size}
+                            />
+                            <InfoRow
+                              label="Header size"
+                              value={ad1().segment.header_size}
+                            />
+                          </dl>
+                        </div>
+                        <div>
+                          <h3>Logical Header</h3>
+                          <dl>
+                            <InfoRow label="Signature" value={ad1().logical.signature} />
+                            <InfoRow
+                              label="Image version"
+                              value={ad1().logical.image_version}
+                            />
+                            <InfoRow
+                              label="Zlib chunk size"
+                              value={ad1().logical.zlib_chunk_size}
+                            />
+                            <InfoRow
+                              label="Metadata addr"
+                              value={ad1().logical.logical_metadata_addr}
+                            />
+                            <InfoRow
+                              label="First item addr"
+                              value={ad1().logical.first_item_addr}
+                            />
+                            <InfoRow
+                              label="Data source"
+                              value={ad1().logical.data_source_name}
+                            />
+                            <InfoRow label="Item count" value={ad1().item_count} />
+                          </dl>
+                        </div>
+                      </div>
+                    )}
+                  </Show>
+                  
+                  <Show when={data().e01}>
+                    {(e01) => (
+                      <div class="info-grid">
+                        <div>
+                          <h3>E01 (Expert Witness Format)</h3>
+                          <dl>
+                            <InfoRow label="Format" value={e01().format_version} />
+                            <InfoRow label="Segments" value={e01().segment_count} />
+                            <InfoRow label="Compression" value={e01().compression} />
+                            <InfoRow label="Total Size" value={`${(e01().total_size / 1024 / 1024).toFixed(2)} MB`} />
+                            <InfoRow label="Sector Count" value={e01().sector_count} />
+                            <InfoRow label="Bytes/Sector" value={e01().bytes_per_sector} />
+                            <InfoRow label="Sectors/Chunk" value={e01().sectors_per_chunk} />
+                            <InfoRow label="Total Chunks" value={e01().chunk_count} />
+                          </dl>
+                        </div>
+                        <div>
+                          <h3>Case Information</h3>
+                          <dl>
+                            <Show when={e01().case_number}>
+                              <InfoRow label="Case Number" value={e01().case_number!} />
+                            </Show>
+                            <Show when={e01().evidence_number}>
+                              <InfoRow label="Evidence Number" value={e01().evidence_number!} />
+                            </Show>
+                            <Show when={e01().examiner_name}>
+                              <InfoRow label="Examiner" value={e01().examiner_name!} />
+                            </Show>
+                            <Show when={e01().description}>
+                              <InfoRow label="Description" value={e01().description!} />
+                            </Show>
+                            <Show when={e01().notes}>
+                              <InfoRow label="Notes" value={e01().notes!} />
+                            </Show>
+                            <Show when={e01().acquiry_date}>
+                              <InfoRow label="Acquired" value={e01().acquiry_date!} />
+                            </Show>
+                            <Show when={e01().system_date}>
+                              <InfoRow label="System Date" value={e01().system_date!} />
+                            </Show>
+                            <Show when={e01().model}>
+                              <InfoRow label="Model" value={e01().model!} />
+                            </Show>
+                            <Show when={e01().serial_number}>
+                              <InfoRow label="Serial Number" value={e01().serial_number!} />
+                            </Show>
+                          </dl>
+                        </div>
+                      </div>
+                    )}
+                  </Show>
+                  
+                  <Show when={data().l01}>
+                    {(l01) => (
+                      <div class="info-grid">
+                        <div>
+                          <h3>L01 (Logical Evidence File)</h3>
+                          <dl>
+                            <InfoRow label="Format Version" value={l01().format_version} />
+                            <InfoRow label="File Count" value={l01().file_count} />
+                            <InfoRow label="Total Size" value={`${(l01().total_size / 1024 / 1024).toFixed(2)} MB`} />
+                            <InfoRow label="Case Info" value={l01().case_info} />
+                            <Show when={l01().examiner}>
+                              <InfoRow label="Examiner" value={l01().examiner!} />
+                            </Show>
+                            <Show when={l01().description}>
+                              <InfoRow label="Description" value={l01().description!} />
+                            </Show>
+                          </dl>
+                        </div>
+                      </div>
+                    )}
+                  </Show>
+                  
+                  <Show when={!data().ad1 && !data().e01 && !data().l01}>
                     <div class="muted">
                       <p>{data().note ?? "Unsupported logical container."}</p>
                       <p>Detected container: {data().container}</p>
                     </div>
-                  }
-                >
-                  {(ad1) => (
-                    <div class="info-grid">
-                      <div>
-                        <h3>Segment Header</h3>
-                        <dl>
-                          <InfoRow label="Signature" value={ad1().segment.signature} />
-                          <InfoRow
-                            label="Segment index"
-                            value={ad1().segment.segment_index}
-                          />
-                          <InfoRow
-                            label="Segment count"
-                            value={ad1().segment.segment_number}
-                          />
-                          <InfoRow
-                            label="Fragments size"
-                            value={ad1().segment.fragments_size}
-                          />
-                          <InfoRow
-                            label="Header size"
-                            value={ad1().segment.header_size}
-                          />
-                        </dl>
-                      </div>
-                      <div>
-                        <h3>Logical Header</h3>
-                        <dl>
-                          <InfoRow label="Signature" value={ad1().logical.signature} />
-                          <InfoRow
-                            label="Image version"
-                            value={ad1().logical.image_version}
-                          />
-                          <InfoRow
-                            label="Zlib chunk size"
-                            value={ad1().logical.zlib_chunk_size}
-                          />
-                          <InfoRow
-                            label="Metadata addr"
-                            value={ad1().logical.logical_metadata_addr}
-                          />
-                          <InfoRow
-                            label="First item addr"
-                            value={ad1().logical.first_item_addr}
-                          />
-                          <InfoRow
-                            label="Data source"
-                            value={ad1().logical.data_source_name}
-                          />
-                          <InfoRow label="Item count" value={ad1().item_count} />
-                        </dl>
-                      </div>
-                    </div>
-                  )}
-                </Show>
+                  </Show>
+                </>
               )}
             </Show>
           </section>

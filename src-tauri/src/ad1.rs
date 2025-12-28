@@ -1,18 +1,23 @@
 use chrono::{Local, NaiveDateTime, TimeZone};
 use filetime::FileTime;
 use flate2::read::ZlibDecoder;
+use rayon::prelude::*;
 use serde::Serialize;
 use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::{Sha256, Sha512};
+use blake2::Blake2b512;
+use blake3::Hasher as Blake3Hasher;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-const AD1_SIGNATURE: &[u8; 16] = b"ADSEGMENTEDFILE";
+const AD1_SIGNATURE: &[u8; 15] = b"ADSEGMENTEDFILE";
 const AD1_LOGICAL_MARGIN: u64 = 512;
 const AD1_FOLDER_SIGNATURE: u32 = 0x05;
-const CACHE_SIZE: usize = 25;
+const CACHE_SIZE: usize = 100;  // Increased from 25 for better cache hit rate
 const SEGMENT_BLOCK_SIZE: u64 = 65_536;
 
 const HASH_INFO: u32 = 0x01;
@@ -113,10 +118,11 @@ struct Item {
     children: Vec<Item>,
 }
 
+/// LRU cache entry with access counter
+#[derive(Clone)]
 struct CacheEntry {
-    counter: u32,
-    item_id: u64,
-    data: Option<Arc<Vec<u8>>>,
+    data: Arc<Vec<u8>>,
+    access_count: u32,
 }
 
 struct Session {
@@ -126,7 +132,8 @@ struct Session {
     file_sizes: Vec<u64>,
     item_counter: u64,
     root_items: Vec<Item>,
-    cache: Vec<CacheEntry>,
+    cache: HashMap<u64, CacheEntry>,  // item_id -> cached data
+    cache_order: Vec<u64>,  // LRU order tracking
 }
 
 pub fn info(path: &str, include_tree: bool) -> Result<Ad1Info, String> {
@@ -154,7 +161,8 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
     let mut session = Session::open(path)?;
     let algo = parse_algorithm(algorithm)?;
     let mut results = Vec::new();
-    for item in &session.root_items {
+    let root_items = session.root_items.clone();
+    for item in &root_items {
         session.verify_item(item, "", algo, &mut results)?;
     }
     Ok(results)
@@ -167,7 +175,8 @@ pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
     let mut session = Session::open(path)?;
     fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
-    for item in &session.root_items {
+    let root_items = session.root_items.clone();
+    for item in &root_items {
         session.extract_item(item, Path::new(output_dir))?;
     }
     Ok(())
@@ -183,7 +192,7 @@ pub fn is_ad1(path: &str) -> Result<bool, String> {
     let mut signature = [0u8; 16];
     file.read_exact(&mut signature)
         .map_err(|e| format!("Failed to read file signature: {e}"))?;
-    Ok(&signature == AD1_SIGNATURE)
+    Ok(&signature[..15] == AD1_SIGNATURE)
 }
 
 impl Session {
@@ -217,11 +226,8 @@ impl Session {
             file_sizes,
             item_counter: 0,
             root_items: Vec::new(),
-            cache: vec![CacheEntry {
-                counter: 0,
-                item_id: 0,
-                data: None,
-            }; CACHE_SIZE],
+            cache: HashMap::with_capacity(CACHE_SIZE),
+            cache_order: Vec::with_capacity(CACHE_SIZE),
         };
 
         let root_items = session.read_item_chain(session.logical_header.first_item_addr)?;
@@ -390,9 +396,26 @@ impl Session {
             addresses.push(addr);
         }
 
-        let mut output = vec![0u8; item.decompressed_size as usize];
+        // For small files (< 4 chunks), use sequential decompression
+        // For larger files, use parallel decompression
+        let data = if chunk_count < 4 {
+            self.decompress_sequential(&addresses, item.decompressed_size as usize)?
+        } else {
+            self.decompress_parallel(&addresses, item.decompressed_size as usize)?
+        };
+
+        let data = Arc::new(data);
+        self.cache_data(item.id, data.clone());
+        Ok(data)
+    }
+
+    /// Sequential decompression for small files
+    fn decompress_sequential(&mut self, addresses: &[u64], decompressed_size: usize) -> Result<Vec<u8>, String> {
+        let chunk_count = addresses.len() - 1;
+        let mut output = vec![0u8; decompressed_size];
         let mut data_index = 0usize;
-        for index in 0..chunk_count as usize {
+        
+        for index in 0..chunk_count {
             let start = addresses[index];
             let end = addresses[index + 1];
             let compressed_len = end.saturating_sub(start) as usize;
@@ -409,35 +432,90 @@ impl Session {
             output[data_index..end_index].copy_from_slice(&chunk[..end_index - data_index]);
             data_index = end_index;
         }
-
-        let data = Arc::new(output);
-        self.cache_data(item.id, data.clone());
-        Ok(data)
+        
+        Ok(output)
     }
 
+    /// Parallel decompression for large files
+    fn decompress_parallel(&mut self, addresses: &[u64], decompressed_size: usize) -> Result<Vec<u8>, String> {
+        let chunk_count = addresses.len() - 1;
+        
+        // Pre-read all compressed chunks sequentially (I/O bound)
+        let mut compressed_chunks: Vec<(usize, Vec<u8>)> = Vec::with_capacity(chunk_count);
+        for index in 0..chunk_count {
+            let start = addresses[index];
+            let end = addresses[index + 1];
+            let compressed_len = end.saturating_sub(start) as usize;
+            if compressed_len == 0 {
+                continue;
+            }
+            let compressed = self.read_bytes(start, compressed_len)?;
+            compressed_chunks.push((index, compressed));
+        }
+        
+        // Decompress in parallel (CPU bound)
+        let decompressed_chunks: Vec<Result<(usize, Vec<u8>), String>> = compressed_chunks
+            .par_iter()
+            .map(|(index, compressed)| {
+                let mut decoder = ZlibDecoder::new(&compressed[..]);
+                let mut chunk = Vec::new();
+                decoder
+                    .read_to_end(&mut chunk)
+                    .map_err(|e| format!("Zlib inflate error: {e}"))?;
+                Ok((*index, chunk))
+            })
+            .collect();
+        
+        // Assemble output in order
+        let mut output = vec![0u8; decompressed_size];
+        let mut data_index = 0usize;
+        
+        // Sort by index to maintain order
+        let mut sorted_chunks: Vec<(usize, Vec<u8>)> = Vec::with_capacity(decompressed_chunks.len());
+        for result in decompressed_chunks {
+            sorted_chunks.push(result?);
+        }
+        sorted_chunks.sort_by_key(|(idx, _)| *idx);
+        
+        for (_, chunk) in sorted_chunks {
+            let end_index = (data_index + chunk.len()).min(output.len());
+            output[data_index..end_index].copy_from_slice(&chunk[..end_index - data_index]);
+            data_index = end_index;
+        }
+        
+        Ok(output)
+    }
+
+    /// O(1) cache lookup using HashMap
     fn search_cache(&mut self, item_id: u64) -> Option<Arc<Vec<u8>>> {
-        for entry in &mut self.cache {
-            if entry.item_id == item_id {
-                entry.counter = entry.counter.saturating_add(1);
-                return entry.data.clone();
-            }
-            if entry.counter > 0 {
-                entry.counter -= 1;
-            }
-            if entry.counter == 0 {
-                entry.data = None;
-                entry.item_id = 0;
-            }
+        if let Some(entry) = self.cache.get_mut(&item_id) {
+            entry.access_count = entry.access_count.saturating_add(1);
+            return Some(entry.data.clone());
         }
         None
     }
 
+    /// LRU cache insertion with eviction
     fn cache_data(&mut self, item_id: u64, data: Arc<Vec<u8>>) {
-        if let Some(entry) = self.cache.iter_mut().find(|entry| entry.counter == 0) {
-            entry.counter = 5;
-            entry.item_id = item_id;
-            entry.data = Some(data);
+        // If already in cache, update
+        if self.cache.contains_key(&item_id) {
+            return;
         }
+        
+        // Evict oldest entry if cache is full
+        if self.cache.len() >= CACHE_SIZE {
+            if let Some(oldest_id) = self.cache_order.first().copied() {
+                self.cache.remove(&oldest_id);
+                self.cache_order.remove(0);
+            }
+        }
+        
+        // Insert new entry
+        self.cache.insert(item_id, CacheEntry {
+            data,
+            access_count: 1,
+        });
+        self.cache_order.push(item_id);
     }
 
     fn verify_item(
@@ -449,27 +527,31 @@ impl Session {
     ) -> Result<(), String> {
         let path = join_path(parent_path, &item.name);
         if item.item_type != AD1_FOLDER_SIGNATURE {
+            // For MD5/SHA1, compare against stored hash in AD1 metadata
+            // For other algorithms, just compute and report (no stored hash to compare)
             let stored = match algorithm {
                 HashAlgorithm::Md5 => find_hash(&item.metadata, MD5_HASH),
                 HashAlgorithm::Sha1 => find_hash(&item.metadata, SHA1_HASH),
+                // AD1 only stores MD5 and SHA1, other algorithms compute-only
+                HashAlgorithm::Sha256 | HashAlgorithm::Sha512 | 
+                HashAlgorithm::Blake3 | HashAlgorithm::Blake2 => None,
             };
-            let status = if let Some(stored_hash) = stored {
-                let data = self.read_file_data(item)?;
-                let computed = match algorithm {
-                    HashAlgorithm::Md5 => format!("{:x}", md5::compute(&*data)),
-                    HashAlgorithm::Sha1 => {
-                        let mut hasher = Sha1::new();
-                        hasher.update(&*data);
-                        hex::encode(hasher.finalize())
+            
+            let data = self.read_file_data(item)?;
+            let computed = compute_hash(&data, algorithm);
+            
+            let status = match stored {
+                Some(stored_hash) => {
+                    if stored_hash == computed {
+                        "ok"
+                    } else {
+                        "nok"
                     }
-                };
-                if stored_hash == computed {
-                    "ok"
-                } else {
-                    "nok"
                 }
-            } else {
-                "error"
+                None => {
+                    // No stored hash - for non-MD5/SHA1 algorithms, report computed hash
+                    "computed"
+                }
             };
 
             out.push(VerifyEntry {
@@ -637,7 +719,7 @@ fn validate_input(path: &str) -> Result<(), String> {
     let mut signature = [0u8; 16];
     file.read_exact(&mut signature)
         .map_err(|e| format!("Failed to read file signature: {e}"))?;
-    if &signature != AD1_SIGNATURE {
+    if &signature[..15] != AD1_SIGNATURE {
         return Err("File is not an AD1 segmented image".to_string());
     }
 
@@ -681,7 +763,7 @@ fn read_segment_header(file: &mut File) -> Result<SegmentHeader, String> {
     let mut signature = [0u8; 16];
     file.read_exact(&mut signature)
         .map_err(|e| format!("Failed to read segment signature: {e}"))?;
-    if &signature != AD1_SIGNATURE {
+    if &signature[..15] != AD1_SIGNATURE {
         return Err("File is not of AD1 format".to_string());
     }
 
@@ -751,16 +833,62 @@ fn copy_into_array<const N: usize>(value: &str, max_len: usize) -> Result<[u8; N
     Ok(buf)
 }
 
+/// Supported hash algorithms for file verification
+/// - MD5/SHA1: Compare against stored hashes in AD1 metadata
+/// - SHA256/SHA512: Forensic standard (NIST approved, court-accepted)
+/// - BLAKE3: Modern, extremely fast cryptographic hash
+/// - BLAKE2b: Fast cryptographic hash (used in many security applications)
 #[derive(Clone, Copy)]
 enum HashAlgorithm {
     Md5,
     Sha1,
+    Sha256,
+    Sha512,
+    Blake3,
+    Blake2,
 }
 
 fn parse_algorithm(algorithm: &str) -> Result<HashAlgorithm, String> {
     match algorithm.trim().to_lowercase().as_str() {
         "md5" => Ok(HashAlgorithm::Md5),
-        "sha1" => Ok(HashAlgorithm::Sha1),
-        _ => Err("Unsupported hash algorithm".to_string()),
+        "sha1" | "sha-1" => Ok(HashAlgorithm::Sha1),
+        "sha256" | "sha-256" => Ok(HashAlgorithm::Sha256),
+        "sha512" | "sha-512" => Ok(HashAlgorithm::Sha512),
+        "blake3" => Ok(HashAlgorithm::Blake3),
+        "blake2" | "blake2b" => Ok(HashAlgorithm::Blake2),
+        _ => Err(format!("Unsupported hash algorithm: {}. Supported: md5, sha1, sha256, sha512, blake3, blake2", algorithm)),
+    }
+}
+
+/// Compute hash of data using specified algorithm
+fn compute_hash(data: &[u8], algorithm: HashAlgorithm) -> String {
+    match algorithm {
+        HashAlgorithm::Md5 => format!("{:x}", md5::compute(data)),
+        HashAlgorithm::Sha1 => {
+            let mut hasher = Sha1::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize())
+        }
+        HashAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize())
+        }
+        HashAlgorithm::Sha512 => {
+            let mut hasher = Sha512::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize())
+        }
+        HashAlgorithm::Blake3 => {
+            let mut hasher = Blake3Hasher::new();
+            hasher.update(data);
+            hasher.finalize().to_hex().to_string()
+        }
+        HashAlgorithm::Blake2 => {
+            use blake2::Digest;
+            let mut hasher = Blake2b512::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize())
+        }
     }
 }
