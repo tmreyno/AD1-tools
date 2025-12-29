@@ -25,12 +25,13 @@ hex = "0.4"
 md5 = "0.7"
 sha1 = { version = "0.10", features = ["asm"] }  # Enable SHA-NI hardware acceleration if available
 sha2 = { version = "0.10", features = ["asm"] }  # SHA-256 with hardware acceleration
-blake3 = "1.5"  # Extremely fast, parallelizable hash
+blake3 = { version = "1.5", features = ["rayon"] }  # Extremely fast, parallelizable hash with multi-threaded support
 blake2 = "0.10"  # Faster than SHA-2
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }  # Non-crypto but extremely fast
 crc32fast = "1.4"
 rayon = "1.10"
 num_cpus = "1.16"
+regex = "1"  # For parsing companion log files
 
 [profile.release]
 opt-level = 3           # Maximum optimizations

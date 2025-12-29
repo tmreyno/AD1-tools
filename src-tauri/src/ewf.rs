@@ -17,6 +17,8 @@ use blake3::Hasher as Blake3Hasher;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh64::Xxh64;
 
+use crate::common::{BUFFER_SIZE, hash::StreamingHasher, binary::{read_u32_le, read_u64_le}};
+
 // Debug macro - only prints when E01_DEBUG env var is set
 #[allow(unused_macros)]
 macro_rules! debug_print {
@@ -25,6 +27,18 @@ macro_rules! debug_print {
             eprintln!($($arg)*);
         }
     };
+}
+
+// =============================================================================
+// Stored Hash Types - Hashes embedded in EWF file headers
+// =============================================================================
+
+#[derive(Serialize, Clone, Debug)]
+pub struct StoredImageHash {
+    pub algorithm: String,
+    pub hash: String,
+    pub timestamp: Option<String>,  // When hash was created (from acquiry_date)
+    pub source: Option<String>,     // Source: "container" for embedded hashes
 }
 
 // =============================================================================
@@ -220,6 +234,8 @@ pub struct E01Handle {
     chunk_table: Vec<ChunkLocation>,
     /// Chunk data cache
     chunk_cache: ChunkCache,
+    /// Stored image hashes from hash/digest sections
+    stored_hashes: Vec<StoredImageHash>,
 }
 
 #[derive(Clone)]
@@ -255,7 +271,7 @@ impl E01Handle {
         }
         
         // Step 4: Parse sections globally (not per-segment!)
-        let (segments, volume_info, chunk_table) = Self::parse_sections_globally(&mut file_pool, &segment_sizes)?;
+        let (segments, volume_info, chunk_table, stored_hashes) = Self::parse_sections_globally(&mut file_pool, &segment_sizes)?;
         
         let volume = volume_info.ok_or("No volume section found")?;
         
@@ -268,6 +284,7 @@ impl E01Handle {
             volume,
             chunk_table,
             chunk_cache,
+            stored_hashes,
         })
     }
 
@@ -275,7 +292,7 @@ impl E01Handle {
     fn parse_sections_globally(
         file_pool: &mut FileIoPool,
         segment_sizes: &[u64],
-    ) -> Result<(Vec<SegmentFile>, Option<VolumeSection>, Vec<ChunkLocation>), String> {
+    ) -> Result<(Vec<SegmentFile>, Option<VolumeSection>, Vec<ChunkLocation>, Vec<StoredImageHash>), String> {
         // Initialize segment file structures
         let mut segments: Vec<SegmentFile> = (0..file_pool.get_file_count())
             .map(|i| SegmentFile {
@@ -288,6 +305,7 @@ impl E01Handle {
         
         let mut volume_info: Option<VolumeSection> = None;
         let mut chunk_locations = Vec::new();
+        let mut stored_hashes: Vec<StoredImageHash> = Vec::new();
         
         // Track sectors section for delta chunk scanning
         let mut sectors_data_offset: Option<u64> = None;
@@ -401,6 +419,27 @@ impl E01Handle {
                     // table2 sections contain checksums, not chunk offsets - skip them
                     debug_print!("  Skipping table2 section (contains checksums)");
                 }
+                "hash" => {
+                    // Hash section contains MD5 hash (16 bytes)
+                    // Section descriptor is 76 bytes, hash data follows
+                    let data_global_offset = current_global_offset + 76;
+                    let (data_seg_idx, data_offset_in_seg) = Self::global_to_segment_offset(data_global_offset, segment_sizes)?;
+                    
+                    if let Ok(hashes) = Self::read_hash_section(file_pool, data_seg_idx, data_offset_in_seg) {
+                        debug_print!("  Found {} hashes in hash section", hashes.len());
+                        stored_hashes.extend(hashes);
+                    }
+                }
+                "digest" => {
+                    // Digest section (EWF2) contains MD5 (16 bytes) + SHA1 (20 bytes)
+                    let data_global_offset = current_global_offset + 76;
+                    let (data_seg_idx, data_offset_in_seg) = Self::global_to_segment_offset(data_global_offset, segment_sizes)?;
+                    
+                    if let Ok(hashes) = Self::read_digest_section(file_pool, data_seg_idx, data_offset_in_seg, section_desc.size) {
+                        debug_print!("  Found {} hashes in digest section", hashes.len());
+                        stored_hashes.extend(hashes);
+                    }
+                }
                 "done" => {
                     segments[seg_idx].sections.push(seg_section);
                     debug_print!("Reached 'done' section, stopping");
@@ -465,7 +504,7 @@ impl E01Handle {
             }
         }
         
-        Ok((segments, volume_info, chunk_locations))
+        Ok((segments, volume_info, chunk_locations, stored_hashes))
     }
     
     /// Scan for delta/inline chunks in sectors section
@@ -853,6 +892,95 @@ impl E01Handle {
             offsets,
         })
     }
+
+    /// Read hash section from EWF file (EWF1 format)
+    /// Hash section structure:
+    /// - 16 bytes: MD5 hash
+    /// - rest: reserved/padding
+    fn read_hash_section(
+        file_pool: &mut FileIoPool,
+        file_index: usize,
+        offset: u64,
+    ) -> Result<Vec<StoredImageHash>, String> {
+        let file = file_pool.get_file(file_index)?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("Failed to seek to hash section: {}", e))?;
+        
+        let mut hashes = Vec::new();
+        
+        // Read MD5 hash (16 bytes)
+        let mut md5_bytes = [0u8; 16];
+        if file.read_exact(&mut md5_bytes).is_ok() {
+            // Check if it's not all zeros (valid hash)
+            if md5_bytes.iter().any(|&b| b != 0) {
+                let md5_hash = md5_bytes.iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
+                hashes.push(StoredImageHash {
+                    algorithm: "MD5".to_string(),
+                    hash: md5_hash,
+                    timestamp: None,  // Will be set from acquiry_date by caller
+                    source: Some("container".to_string()),
+                });
+            }
+        }
+        
+        Ok(hashes)
+    }
+
+    /// Read digest section from EWF2 format
+    /// Digest section structure:
+    /// - 16 bytes: MD5 hash
+    /// - 20 bytes: SHA1 hash  
+    /// - padding/checksum
+    fn read_digest_section(
+        file_pool: &mut FileIoPool,
+        file_index: usize,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<StoredImageHash>, String> {
+        let file = file_pool.get_file(file_index)?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("Failed to seek to digest section: {}", e))?;
+        
+        let mut hashes = Vec::new();
+        
+        // Read MD5 hash (16 bytes)
+        let mut md5_bytes = [0u8; 16];
+        if file.read_exact(&mut md5_bytes).is_ok() {
+            if md5_bytes.iter().any(|&b| b != 0) {
+                let md5_hash = md5_bytes.iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
+                hashes.push(StoredImageHash {
+                    algorithm: "MD5".to_string(),
+                    hash: md5_hash,
+                    timestamp: None,  // Will be set from acquiry_date by caller
+                    source: Some("container".to_string()),
+                });
+            }
+        }
+        
+        // Read SHA1 hash (20 bytes) if section is large enough
+        if size >= 36 {
+            let mut sha1_bytes = [0u8; 20];
+            if file.read_exact(&mut sha1_bytes).is_ok() {
+                if sha1_bytes.iter().any(|&b| b != 0) {
+                    let sha1_hash = sha1_bytes.iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>();
+                    hashes.push(StoredImageHash {
+                        algorithm: "SHA1".to_string(),
+                        hash: sha1_hash,
+                        timestamp: None,  // Will be set from acquiry_date by caller
+                        source: Some("container".to_string()),
+                    });
+                }
+            }
+        }
+        
+        Ok(hashes)
+    }
 }
 
 // =============================================================================
@@ -884,27 +1012,19 @@ fn discover_segments(base_path: &str) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
+// Delegate to common binary read functions
 fn read_u32(file: &mut File) -> Result<u32, String> {
-    let mut buf = [0u8; 4];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Read u32 failed: {}", e))?;
-    Ok(u32::from_le_bytes(buf))
+    read_u32_le(file)
 }
 
 // Read u32 in BIG-ENDIAN format (used for table entry offsets in EWF)
 #[allow(dead_code)]
 fn read_u32_be(file: &mut File) -> Result<u32, String> {
-    let mut buf = [0u8; 4];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Read u32 BE failed: {}", e))?;
-    Ok(u32::from_be_bytes(buf))
+    crate::common::binary::read_u32_be(file)
 }
 
 fn read_u64(file: &mut File) -> Result<u64, String> {
-    let mut buf = [0u8; 8];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Read u64 failed: {}", e))?;
-    Ok(u64::from_le_bytes(buf))
+    read_u64_le(file)
 }
 
 // =============================================================================
@@ -913,23 +1033,50 @@ fn read_u64(file: &mut File) -> Result<u64, String> {
 
 #[derive(Serialize)]
 pub struct E01Info {
+    pub format_version: String,
     pub segment_count: u32,
     pub chunk_count: u32,
     pub sector_count: u64,
     pub bytes_per_sector: u32,
     pub sectors_per_chunk: u32,
+    pub total_size: u64,
+    pub compression: String,
+    pub case_number: Option<String>,
+    pub description: Option<String>,
+    pub examiner_name: Option<String>,
+    pub evidence_number: Option<String>,
+    pub notes: Option<String>,
+    pub acquiry_date: Option<String>,
+    pub system_date: Option<String>,
+    pub model: Option<String>,
+    pub serial_number: Option<String>,
+    pub stored_hashes: Vec<StoredImageHash>,
 }
 
 pub fn info(path: &str) -> Result<E01Info, String> {
     let handle = E01Handle::open(path)?;
     let volume = handle.get_volume_info();
+    let total_size = volume.sector_count * volume.bytes_per_sector as u64;
     
     Ok(E01Info {
+        format_version: "EWF1".to_string(), // Default format version
         segment_count: handle.file_pool.get_file_count() as u32,
         chunk_count: handle.get_chunk_count() as u32,
         sector_count: volume.sector_count,
         bytes_per_sector: volume.bytes_per_sector,
         sectors_per_chunk: volume.sectors_per_chunk,
+        total_size,
+        compression: "Good (Fast)".to_string(), // Default compression level
+        case_number: None,
+        description: None,
+        examiner_name: None,
+        evidence_number: None,
+        notes: None,
+        acquiry_date: None,
+        system_date: None,
+        model: None,
+        serial_number: None,
+        stored_hashes: handle.stored_hashes.clone(),
     })
 }
 
@@ -950,6 +1097,87 @@ pub fn is_e01(path: &str) -> Result<bool, String> {
     
     // Check for EVF (EWF1) or EVF2 (EWF2) signature
     Ok(&sig == EWF_SIGNATURE || &sig == EWF2_SIGNATURE)
+}
+
+/// Get all E01 segment file paths
+pub fn get_segment_paths(path: &str) -> Result<Vec<PathBuf>, String> {
+    discover_segments(path)
+}
+
+/// Hash a single E01 segment file
+pub fn hash_single_segment<F>(segment_path: &str, algorithm: &str, mut progress_callback: F) -> Result<String, String>
+where
+    F: FnMut(u64, u64)
+{
+    use std::io::BufRead;
+    
+    let path = Path::new(segment_path);
+    if !path.exists() {
+        return Err(format!("Segment file not found: {}", segment_path));
+    }
+    
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+    let total_size = metadata.len();
+    
+    let file = File::open(path)
+        .map_err(|e| format!("Failed to open segment: {}", e))?;
+    let mut reader = std::io::BufReader::with_capacity(BUFFER_SIZE, file);
+    
+    let algorithm_lower = algorithm.to_lowercase();
+    
+    // For BLAKE3, use parallel hashing for best performance
+    if algorithm_lower == "blake3" {
+        let mut hasher = blake3::Hasher::new();
+        let mut bytes_read_total = 0u64;
+        let report_interval = (total_size / 20).max(BUFFER_SIZE as u64);
+        let mut last_report = 0u64;
+        
+        loop {
+            let buf = reader.fill_buf()
+                .map_err(|e| format!("Read error: {}", e))?;
+            let len = buf.len();
+            if len == 0 { break; }
+            
+            hasher.update_rayon(buf);
+            reader.consume(len);
+            
+            bytes_read_total += len as u64;
+            if bytes_read_total - last_report >= report_interval {
+                progress_callback(bytes_read_total, total_size);
+                last_report = bytes_read_total;
+            }
+        }
+        
+        progress_callback(total_size, total_size);
+        return Ok(hasher.finalize().to_hex().to_string());
+    }
+    
+    // For other algorithms, use StreamingHasher
+    let mut hasher = StreamingHasher::from_str(algorithm)?;
+    
+    let mut bytes_read_total = 0u64;
+    let report_interval = (total_size / 20).max(BUFFER_SIZE as u64);
+    let mut last_report = 0u64;
+    
+    loop {
+        let buf = reader.fill_buf()
+            .map_err(|e| format!("Read error: {}", e))?;
+        let len = buf.len();
+        if len == 0 { break; }
+        
+        hasher.update(buf);
+        reader.consume(len);
+        bytes_read_total += len as u64;
+        
+        if bytes_read_total - last_report >= report_interval {
+            progress_callback(bytes_read_total, total_size);
+            last_report = bytes_read_total;
+        }
+    }
+    
+    progress_callback(total_size, total_size);
+    Ok(hasher.finalize())
 }
 
 /// VerifyEntry for container verification results

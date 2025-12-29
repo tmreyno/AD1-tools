@@ -293,6 +293,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
+ "rayon-core",
 ]
 
 [[package]]
@@ -1975,6 +1976,7 @@ dependencies = [
  "md5",
  "num_cpus",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "sha1",

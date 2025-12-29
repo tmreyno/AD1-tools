@@ -1,11 +1,52 @@
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
+use regex::Regex;
 
 use crate::ad1;
 use crate::ewf;  // Expert Witness Format (E01/EWF/Ex01)
 use crate::l01;
 use crate::raw;  // Raw disk images (.dd, .raw, .img, .001)
+
+#[derive(Serialize, Clone)]
+pub struct StoredHash {
+    pub algorithm: String,
+    pub hash: String,
+    pub verified: Option<bool>,  // None if not verified, Some(true) if verified, Some(false) if mismatch
+    pub timestamp: Option<String>,  // When hash was created/verified (ISO 8601 or human-readable)
+    pub source: Option<String>,     // Where hash came from: "container", "companion", "computed"
+}
+
+/// Per-segment hash information from companion log files
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SegmentHash {
+    pub segment_name: String,       // e.g., "SCHARDT.001"
+    pub segment_number: u32,        // e.g., 1
+    pub algorithm: String,          // e.g., "MD5"
+    pub hash: String,               // The hash value
+    pub offset_from: Option<u64>,   // Starting byte/sector offset
+    pub offset_to: Option<u64>,     // Ending byte/sector offset
+    pub size: Option<u64>,          // Segment size
+    pub verified: Option<bool>,     // Verification status
+}
+
+#[derive(Serialize, Clone)]
+pub struct CompanionLogInfo {
+    pub log_path: String,
+    pub created_by: Option<String>,
+    pub case_number: Option<String>,
+    pub evidence_number: Option<String>,
+    pub unique_description: Option<String>,
+    pub examiner: Option<String>,
+    pub notes: Option<String>,
+    pub acquisition_started: Option<String>,
+    pub acquisition_finished: Option<String>,
+    pub verification_started: Option<String>,
+    pub verification_finished: Option<String>,
+    pub stored_hashes: Vec<StoredHash>,
+    pub segment_list: Vec<String>,
+    pub segment_hashes: Vec<SegmentHash>,  // Per-segment hashes
+}
 
 #[derive(Serialize)]
 pub struct ContainerInfo {
@@ -15,6 +56,7 @@ pub struct ContainerInfo {
     pub l01: Option<l01::L01Info>,
     pub raw: Option<raw::RawInfo>,
     pub note: Option<String>,
+    pub companion_log: Option<CompanionLogInfo>,
 }
 
 #[derive(Serialize)]
@@ -24,6 +66,8 @@ pub struct DiscoveredFile {
     pub container_type: String,
     pub size: u64,
     pub segment_count: Option<u32>,
+    pub created: Option<String>,
+    pub modified: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -43,6 +87,9 @@ enum ContainerKind {
 
 pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
     let kind = detect_container(path)?;
+    // Try to find and parse companion log file
+    let companion_log = find_companion_log(path);
+    
     match kind {
         ContainerKind::Ad1 => {
             let info = ad1::info(path, include_tree)?;
@@ -53,6 +100,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 l01: None,
                 raw: None,
                 note: None,
+                companion_log,
             })
         }
         ContainerKind::E01 => {
@@ -64,6 +112,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 l01: None,
                 raw: None,
                 note: None,
+                companion_log,
             })
         }
         ContainerKind::L01 => {
@@ -75,6 +124,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 l01: Some(info),
                 raw: None,
                 note: None,
+                companion_log,
             })
         }
         ContainerKind::Raw => {
@@ -86,6 +136,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 l01: None,
                 raw: Some(info),
                 note: None,
+                companion_log,
             })
         }
     }
@@ -178,6 +229,168 @@ pub fn scan_directory_recursive(dir_path: &str) -> Result<Vec<DiscoveredFile>, S
     scan_directory_impl(dir_path, true)
 }
 
+/// Streaming scan that calls callback for each file found (for real-time UI updates)
+pub fn scan_directory_streaming<F>(dir_path: &str, recursive: bool, on_file_found: F) -> Result<usize, String>
+where
+    F: Fn(&DiscoveredFile),
+{
+    let path = Path::new(dir_path);
+    if !path.exists() {
+        return Err(format!("Directory not found: {dir_path}"));
+    }
+    if !path.is_dir() {
+        return Err(format!("Path is not a directory: {dir_path}"));
+    }
+
+    let mut seen_basenames = std::collections::HashSet::new();
+    let mut count = 0;
+
+    scan_dir_streaming_internal(path, &mut seen_basenames, recursive, &on_file_found, &mut count)?;
+
+    Ok(count)
+}
+
+fn scan_dir_streaming_internal<F>(
+    path: &Path,
+    seen_basenames: &mut std::collections::HashSet<String>,
+    recursive: bool,
+    on_file_found: &F,
+    count: &mut usize,
+) -> Result<(), String>
+where
+    F: Fn(&DiscoveredFile),
+{
+    let entries = fs::read_dir(path)
+        .map_err(|e| format!("Failed to read directory: {e}"))?;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let entry_path = entry.path();
+        
+        // Recurse into subdirectories if enabled
+        if recursive && entry_path.is_dir() {
+            let _ = scan_dir_streaming_internal(&entry_path, seen_basenames, recursive, on_file_found, count);
+            continue;
+        }
+        
+        if !entry_path.is_file() {
+            continue;
+        }
+
+        let path_str = match entry_path.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let filename = entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+
+        let lower = filename.to_lowercase();
+        
+        // Check for forensic container files (same logic as scan_dir_internal)
+        let container_type = if lower.ends_with(".ad1") || lower.ends_with(".ad2") || lower.ends_with(".ad3") {
+            match crate::ad1::is_ad1(path_str) {
+                Ok(true) => Some("AD1"),
+                _ => None,
+            }
+        } else if lower.ends_with(".l01") {
+            Some("L01")
+        } else if lower.ends_with(".lx01") {
+            Some("Lx01")
+        } else if lower.ends_with(".tar") {
+            if lower.contains("logical") {
+                Some("TAR (Logical)")
+            } else {
+                Some("TAR")
+            }
+        } else if lower.ends_with(".e01") {
+            Some("EnCase (E01)")
+        } else if is_numbered_segment(&lower) {
+            let first_seg_path = get_first_segment_path(path_str);
+            if crate::ewf::is_e01(&first_seg_path).unwrap_or(false) {
+                Some("EnCase (E01)")
+            } else if crate::raw::is_raw(&first_seg_path).unwrap_or(false) {
+                Some("Raw Image")
+            } else {
+                Some("Raw Image")
+            }
+        } else if lower.ends_with(".ex01") {
+            Some("EnCase (Ex01)")
+        } else if lower.ends_with(".aff") || lower.ends_with(".afd") {
+            Some("AFF")
+        } else if lower.ends_with(".dd") || lower.ends_with(".raw") || lower.ends_with(".img") {
+            Some("Raw Image")
+        } else {
+            None
+        };
+
+        if let Some(ctype) = container_type {
+            // For multi-segment files (like .E01, .001), only show the first segment
+            let basename = get_segment_basename(&filename);
+            if seen_basenames.insert(basename.clone()) {
+                // For numbered segments, always use the first segment path (.001)
+                let display_path = if is_numbered_segment(&lower) {
+                    get_first_segment_path(path_str)
+                } else {
+                    path_str.to_string()
+                };
+                
+                let display_filename = Path::new(&display_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or(filename.clone());
+                
+                let metadata = entry.metadata().ok();
+                let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                
+                let created = metadata.as_ref().and_then(|m| {
+                    m.created().ok()
+                        .map(|t| {
+                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+                            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+                        })
+                });
+                
+                let modified = metadata.as_ref().and_then(|m| {
+                    m.modified().ok()
+                        .map(|t| {
+                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+                            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+                        })
+                });
+
+                let parent_dir = entry_path.parent().unwrap_or(path);
+                let (total_size, segment_count): (u64, Option<u32>) = if is_segmented_file(&lower) {
+                    calculate_total_segment_info(parent_dir, &basename).unwrap_or((file_size, None))
+                } else {
+                    (file_size, None)
+                };
+
+                let file = DiscoveredFile {
+                    path: display_path,
+                    filename: display_filename,
+                    container_type: ctype.to_string(),
+                    size: total_size,
+                    segment_count,
+                    created,
+                    modified,
+                };
+                
+                on_file_found(&file);
+                *count += 1;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn scan_directory_impl(dir_path: &str, recursive: bool) -> Result<Vec<DiscoveredFile>, String> {
     let path = Path::new(dir_path);
     if !path.exists() {
@@ -252,8 +465,21 @@ fn scan_dir_internal(
             } else {
                 Some("TAR")
             }
-        } else if is_encase_image(&lower) {
+        } else if lower.ends_with(".e01") {
+            // E01 files are EnCase
             Some("EnCase (E01)")
+        } else if is_numbered_segment(&lower) {
+            // Numbered segments (.001, .002, etc.) - check if EnCase or Raw
+            // Find the first segment (.001) to check magic bytes
+            let first_seg_path = get_first_segment_path(path_str);
+            if ewf::is_e01(&first_seg_path).unwrap_or(false) {
+                Some("EnCase (E01)")
+            } else if raw::is_raw(&first_seg_path).unwrap_or(false) {
+                Some("Raw Image")
+            } else {
+                // Default to raw for unknown numbered segments
+                Some("Raw Image")
+            }
         } else if lower.ends_with(".ex01") {
             Some("EnCase (Ex01)")
         } else if lower.ends_with(".aff") || lower.ends_with(".afd") {
@@ -268,25 +494,55 @@ fn scan_dir_internal(
             // For multi-segment files (like .E01, .001), only show the first segment
             let basename = get_segment_basename(&filename);
             if seen_basenames.insert(basename.clone()) {
-                let size = entry.metadata()
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                // For numbered segments, always use the first segment path (.001)
+                let display_path = if is_numbered_segment(&lower) {
+                    get_first_segment_path(path_str)
+                } else {
+                    path_str.to_string()
+                };
+                
+                let display_filename = Path::new(&display_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or(filename.clone());
+                
+                let metadata = entry.metadata().ok();
+                let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                
+                // Get file creation time (birth time on macOS/Windows, fall back to modified)
+                let created = metadata.as_ref().and_then(|m| {
+                    m.created().ok()
+                        .map(|t| {
+                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+                            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+                        })
+                });
+                
+                // Get file modified time
+                let modified = metadata.as_ref().and_then(|m| {
+                    m.modified().ok()
+                        .map(|t| {
+                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+                            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+                        })
+                });
 
                 // For segmented files, try to calculate total size and count
                 let parent_dir = entry_path.parent().unwrap_or(path);
-                let (total_size, segment_count) = if is_segmented_file(&lower) {
-                    let (size, count) = calculate_total_segment_info(parent_dir, &basename).unwrap_or((size, None));
-                    (size, count)
+                let (total_size, segment_count): (u64, Option<u32>) = if is_segmented_file(&lower) {
+                    calculate_total_segment_info(parent_dir, &basename).unwrap_or((file_size, None))
                 } else {
-                    (size, None)
+                    (file_size, None)
                 };
 
                 discovered.push(DiscoveredFile {
-                    path: path_str.to_string(),
-                    filename,
+                    path: display_path,
+                    filename: display_filename,
                     container_type: ctype.to_string(),
                     size: total_size,
                     segment_count,
+                    created,
+                    modified,
                 });
             }
         }
@@ -295,12 +551,8 @@ fn scan_dir_internal(
     Ok(())
 }
 
-/// Check if filename matches EnCase image pattern (E01 or numbered segments like .001)
-fn is_encase_image(lower: &str) -> bool {
-    if lower.ends_with(".e01") {
-        return true;
-    }
-    // Check for .001, .002, etc. pattern (SCHARDT.001, PC-MUS-001.E01)
+/// Check if filename is a numbered segment (.001, .002, etc.)
+fn is_numbered_segment(lower: &str) -> bool {
     if let Some(ext_start) = lower.rfind('.') {
         let ext = &lower[ext_start + 1..];
         if ext.len() == 3 && ext.chars().all(|c| c.is_ascii_digit()) {
@@ -310,9 +562,41 @@ fn is_encase_image(lower: &str) -> bool {
     false
 }
 
+/// Get the path to the first available segment given any segment path
+/// Tries .001 first, then scans for the lowest numbered segment
+fn get_first_segment_path(path: &str) -> String {
+    let path_obj = Path::new(path);
+    if let Some(parent) = path_obj.parent() {
+        if let Some(filename) = path_obj.file_name() {
+            let filename_str = filename.to_string_lossy();
+            if let Some(dot_pos) = filename_str.rfind('.') {
+                let base = &filename_str[..dot_pos];
+                
+                // Try .001 first (most common)
+                let first_seg = format!("{}.001", base);
+                let first_path = parent.join(&first_seg);
+                if first_path.exists() {
+                    return first_path.to_string_lossy().to_string();
+                }
+                
+                // If .001 doesn't exist, find the lowest numbered segment
+                for num in 2..=999 {
+                    let seg_name = format!("{}.{:03}", base, num);
+                    let seg_path = parent.join(&seg_name);
+                    if seg_path.exists() {
+                        return seg_path.to_string_lossy().to_string();
+                    }
+                }
+            }
+        }
+    }
+    // Return original path if we can't find any lower segment
+    path.to_string()
+}
+
 /// Check if file is part of a segmented series
 fn is_segmented_file(lower: &str) -> bool {
-    is_encase_image(lower) || lower.ends_with(".e02") || lower.ends_with(".ex01")
+    lower.ends_with(".e01") || lower.ends_with(".e02") || lower.ends_with(".ex01") || is_numbered_segment(lower)
 }
 
 /// Get the base name without segment number for grouping
@@ -376,5 +660,574 @@ fn calculate_total_segment_info(dir: &Path, basename: &str) -> Option<(u64, Opti
         }
     }
     
+    None
+}
+
+/// Find and parse companion log file (e.g., .txt file created by FTK Imager, dc3dd, etc.)
+fn find_companion_log(image_path: &str) -> Option<CompanionLogInfo> {
+    let path = Path::new(image_path);
+    let parent = path.parent()?;
+    let stem = path.file_stem()?.to_str()?;
+    let filename = path.file_name()?.to_str()?;
+    
+    // For segmented raw images (.001, .002), get the base name without segment number
+    let base_stem = if let Some(dot_pos) = stem.rfind('.') {
+        let ext = &stem[dot_pos + 1..];
+        if ext.len() == 3 && ext.chars().all(|c| c.is_ascii_digit()) {
+            // This is like "image.001" where stem is "image"
+            stem.to_string()
+        } else {
+            stem.to_string()
+        }
+    } else {
+        stem.to_string()
+    };
+    
+    // Also handle case where filename is "image.001" - stem would be "image"
+    // But if filename is "image.dd.001" - stem would be "image.dd"
+    let numeric_ext = filename.rsplit('.').next()
+        .map(|e| e.len() == 3 && e.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false);
+    
+    let base_for_log = if numeric_ext {
+        // Remove numeric extension from filename for log search
+        &filename[..filename.len() - 4]
+    } else {
+        filename
+    };
+    
+    // Common companion log file patterns for various forensic tools:
+    let mut candidate_paths = vec![
+        // Standard patterns
+        parent.join(format!("{}.txt", filename)),           // image.ad1.txt, image.dd.txt
+        parent.join(format!("{}.txt", stem)),               // image.txt
+        parent.join(format!("{}_info.txt", stem)),          // image_info.txt
+        parent.join(format!("{}.log", filename)),           // image.ad1.log
+        parent.join(format!("{}.log", stem)),               // image.log
+        parent.join(format!("{}.LOG", stem)),               // image.LOG (uppercase for Forensic MD5)
+        
+        // For segmented raw images
+        parent.join(format!("{}.txt", base_for_log)),       // image.dd.txt for image.dd.001
+        parent.join(format!("{}.log", base_for_log)),       // image.dd.log for image.dd.001
+        parent.join(format!("{}.LOG", base_for_log)),       // image.dd.LOG for image.dd.001
+        parent.join(format!("{}_info.txt", base_for_log)),  // image.dd_info.txt
+        
+        // dc3dd / dcfldd patterns
+        parent.join(format!("{}.hash", stem)),              // image.hash
+        parent.join(format!("{}.md5", stem)),               // image.md5
+        parent.join(format!("{}.sha1", stem)),              // image.sha1
+        parent.join(format!("{}.sha256", stem)),            // image.sha256
+        parent.join(format!("{}_hash.txt", stem)),          // image_hash.txt
+        parent.join(format!("{}_hashes.txt", stem)),        // image_hashes.txt
+        
+        // Guymager patterns
+        parent.join(format!("{}.info", stem)),              // image.info
+        parent.join(format!("{}.info", filename)),          // image.dd.info
+        
+        // MacQuisition / Paladin / other tools
+        parent.join(format!("{}_acquisition.txt", stem)),   // image_acquisition.txt
+        parent.join(format!("{}_acquisition.log", stem)),   // image_acquisition.log
+    ];
+    
+    // Also try with base_stem for segmented images
+    if base_stem != stem {
+        candidate_paths.push(parent.join(format!("{}.txt", base_stem)));
+        candidate_paths.push(parent.join(format!("{}.log", base_stem)));
+        candidate_paths.push(parent.join(format!("{}.LOG", base_stem)));  // SCHARDT.LOG
+        candidate_paths.push(parent.join(format!("{}_info.txt", base_stem)));
+    }
+    
+    for log_path in candidate_paths {
+        if log_path.exists() {
+            if let Ok(info) = parse_companion_log(&log_path) {
+                return Some(info);
+            }
+        }
+    }
+    
+    None
+}
+
+/// Parse companion log file from various forensic tools (FTK Imager, dc3dd, dcfldd, Guymager, etc.)
+fn parse_companion_log(log_path: &Path) -> Result<CompanionLogInfo, String> {
+    let content = fs::read_to_string(log_path)
+        .map_err(|e| format!("Failed to read log file: {}", e))?;
+    
+    let mut info = CompanionLogInfo {
+        log_path: log_path.to_string_lossy().to_string(),
+        created_by: None,
+        case_number: None,
+        evidence_number: None,
+        unique_description: None,
+        examiner: None,
+        notes: None,
+        acquisition_started: None,
+        acquisition_finished: None,
+        verification_started: None,
+        verification_finished: None,
+        stored_hashes: Vec::new(),
+        segment_list: Vec::new(),
+        segment_hashes: Vec::new(),
+    };
+    
+    // Detect file format based on content
+    let content_lower = content.to_lowercase();
+    let is_dc3dd = content_lower.contains("dc3dd") || content_lower.contains("dcfldd");
+    let is_guymager = content_lower.contains("guymager");
+    let is_forensic_md5 = content_lower.contains("forensic md5") || 
+                          content.contains("MD5 Value:") ||
+                          content.lines().any(|l| l.trim().starts_with("* ") && l.contains("From:") && l.contains("To:"));
+    let is_hash_only = log_path.extension()
+        .map(|e| matches!(e.to_str(), Some("md5" | "sha1" | "sha256" | "hash")))
+        .unwrap_or(false);
+    
+    // Handle hash-only files (just hash value, maybe with filename)
+    if is_hash_only {
+        if let Some(hash_info) = parse_simple_hash_file(&content, log_path) {
+            info.stored_hashes.push(hash_info);
+            return Ok(info);
+        }
+    }
+    
+    // Handle Forensic MD5 per-segment hash format
+    if is_forensic_md5 {
+        if let Some(segment_hashes) = parse_forensic_md5_segments(&content) {
+            info.segment_hashes = segment_hashes;
+            info.created_by = Some("Forensic MD5".to_string());
+        }
+    }
+    
+    // Parse line by line
+    let mut in_segment_list = false;
+    let mut in_computed_hashes = false;
+    let mut in_verification_results = false;
+    
+    for line in content.lines() {
+        let line = line.trim();
+        let line_lower = line.to_lowercase();
+        
+        // Skip empty lines
+        if line.is_empty() {
+            continue;
+        }
+        
+        // Check for section headers
+        if line.starts_with("Created By ") || line_lower.starts_with("created by:") {
+            let value = line.split_once(':').or(line.split_once(' '))
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_else(|| line.to_string());
+            if !value.is_empty() && value != "By" {
+                info.created_by = Some(value);
+            }
+            continue;
+        }
+        
+        // dc3dd/dcfldd output parsing
+        if is_dc3dd {
+            // Patterns like "md5 hash: abc123..." or "sha256: abc123..."
+            if let Some(hash_info) = parse_dc3dd_hash_line(line) {
+                info.stored_hashes.push(hash_info);
+                continue;
+            }
+            
+            // Input/output device info
+            if line_lower.starts_with("input device:") || line_lower.starts_with("input:") {
+                if let Some((_, v)) = line.split_once(':') {
+                    info.unique_description = Some(v.trim().to_string());
+                }
+                continue;
+            }
+        }
+        
+        // Guymager output parsing
+        if is_guymager {
+            if let Some(hash_info) = parse_guymager_hash_line(line) {
+                info.stored_hashes.push(hash_info);
+                continue;
+            }
+        }
+        
+        if line == "Segment list:" || line == "[Segment List]" {
+            in_segment_list = true;
+            in_computed_hashes = false;
+            in_verification_results = false;
+            continue;
+        }
+        
+        if line.starts_with("[Computed Hashes]") || line == "Computed Hashes:" {
+            in_computed_hashes = true;
+            in_segment_list = false;
+            in_verification_results = false;
+            continue;
+        }
+        
+        if line.starts_with("Image Verification Results:") || line == "[Verification Results]" {
+            in_verification_results = true;
+            in_segment_list = false;
+            in_computed_hashes = false;
+            continue;
+        }
+        
+        // Parse segment list entries
+        if in_segment_list && !line.is_empty() && !line.starts_with("Image") && !line.starts_with("[") {
+            info.segment_list.push(line.to_string());
+            continue;
+        }
+        
+        // Parse hash entries (both computed and verification)
+        if in_computed_hashes || in_verification_results {
+            if let Some(hash_info) = parse_hash_line(line, in_verification_results) {
+                // Check if we already have this algorithm - update with verification status
+                if let Some(existing) = info.stored_hashes.iter_mut()
+                    .find(|h| h.algorithm.to_lowercase() == hash_info.algorithm.to_lowercase()) 
+                {
+                    if hash_info.verified.is_some() {
+                        existing.verified = hash_info.verified;
+                    }
+                } else {
+                    info.stored_hashes.push(hash_info);
+                }
+                continue;
+            }
+        }
+        
+        // Parse key-value pairs
+        if let Some((key, value)) = parse_key_value(line) {
+            match key.to_lowercase().as_str() {
+                "case number" | "case" | "case_number" => info.case_number = Some(value),
+                "evidence number" | "evidence" | "evidence_number" => info.evidence_number = Some(value),
+                "unique description" | "description" => info.unique_description = Some(value),
+                "examiner" | "examiner name" => info.examiner = Some(value),
+                "notes" | "note" | "comments" => info.notes = Some(value),
+                "acquisition started" | "start time" | "started" => info.acquisition_started = Some(value),
+                "acquisition finished" | "end time" | "finished" | "completed" => info.acquisition_finished = Some(value),
+                "verification started" => info.verification_started = Some(value),
+                "verification finished" => info.verification_finished = Some(value),
+                "source" | "source device" | "input" => {
+                    if info.unique_description.is_none() {
+                        info.unique_description = Some(value);
+                    }
+                }
+                "tool" | "program" | "software" => {
+                    if info.created_by.is_none() {
+                        info.created_by = Some(value);
+                    }
+                }
+                _ => {
+                    // Check if this looks like a hash line
+                    if let Some(hash_info) = parse_hash_line(line, false) {
+                        info.stored_hashes.push(hash_info);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Only return if we found useful information
+    if info.stored_hashes.is_empty() 
+        && info.case_number.is_none() 
+        && info.evidence_number.is_none()
+        && info.examiner.is_none()
+        && info.created_by.is_none()
+        && info.unique_description.is_none()
+        && info.segment_list.is_empty()
+        && info.segment_hashes.is_empty()
+    {
+        return Err("No useful information found in log file".to_string());
+    }
+    
+    Ok(info)
+}
+
+/// Parse a simple hash file (just hash value, possibly with filename)
+fn parse_simple_hash_file(content: &str, log_path: &Path) -> Option<StoredHash> {
+    let ext = log_path.extension()?.to_str()?.to_lowercase();
+    let algorithm = match ext.as_str() {
+        "md5" => "MD5",
+        "sha1" => "SHA-1",
+        "sha256" => "SHA-256",
+        "sha512" => "SHA-512",
+        "hash" => return parse_hash_from_content(content, log_path),
+        _ => return None,
+    };
+    
+    // Extract hash from content (might be "hash  filename" or just "hash")
+    let re = Regex::new(r"[a-fA-F0-9]{32,128}").ok()?;
+    let hash = re.find(content.trim())?.as_str().to_lowercase();
+    
+    // Get file modification time as timestamp
+    let timestamp = log_path.metadata().ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+        });
+    
+    Some(StoredHash {
+        algorithm: algorithm.to_string(),
+        hash,
+        verified: None,
+        timestamp,
+        source: Some("companion".to_string()),
+    })
+}
+
+/// Parse hash from generic hash file content
+fn parse_hash_from_content(content: &str, log_path: &Path) -> Option<StoredHash> {
+    let re = Regex::new(r"[a-fA-F0-9]{32,128}").ok()?;
+    let hash = re.find(content.trim())?.as_str().to_lowercase();
+    
+    // Guess algorithm from hash length
+    let algorithm = match hash.len() {
+        32 => "MD5",
+        40 => "SHA-1",
+        64 => "SHA-256",
+        128 => "SHA-512",
+        _ => return None,
+    };
+    
+    // Get file modification time as timestamp
+    let timestamp = log_path.metadata().ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+        });
+    
+    Some(StoredHash {
+        algorithm: algorithm.to_string(),
+        hash,
+        verified: None,
+        timestamp,
+        source: Some("companion".to_string()),
+    })
+}
+
+/// Parse dc3dd/dcfldd style hash output
+fn parse_dc3dd_hash_line(line: &str) -> Option<StoredHash> {
+    let line_lower = line.to_lowercase();
+    
+    // Patterns:
+    // "md5 hash: abc123..."
+    // "sha256 hash of input: abc123..."
+    // "abc123... (md5)"
+    
+    let algorithms = [
+        ("md5", "MD5"),
+        ("sha1", "SHA-1"),
+        ("sha-1", "SHA-1"),
+        ("sha256", "SHA-256"),
+        ("sha-256", "SHA-256"),
+        ("sha512", "SHA-512"),
+        ("sha-512", "SHA-512"),
+    ];
+    
+    for (pattern, algo_name) in &algorithms {
+        if line_lower.contains(pattern) {
+            let re = Regex::new(r"[a-fA-F0-9]{32,128}").ok()?;
+            if let Some(m) = re.find(line) {
+                return Some(StoredHash {
+                    algorithm: algo_name.to_string(),
+                    hash: m.as_str().to_lowercase(),
+                    verified: None,
+                    timestamp: None,  // Will be set by caller from log file context
+                    source: Some("companion".to_string()),
+                });
+            }
+        }
+    }
+    
+    None
+}
+
+/// Parse Guymager style hash output
+fn parse_guymager_hash_line(line: &str) -> Option<StoredHash> {
+    // Guymager patterns:
+    // "MD5 hash verified source: abc123..."
+    // "SHA-256 hash: abc123..."
+    parse_dc3dd_hash_line(line)  // Same pattern matching works
+}
+
+/// Parse a hash line from the log file
+fn parse_hash_line(line: &str, check_verified: bool) -> Option<StoredHash> {
+    let line_lower = line.to_lowercase();
+    
+    // Common patterns:
+    // "MD5 checksum:    e0778ff7fb490fc2c9c56824f9ecf448"
+    // "SHA1 checksum:   93d522376d89b8dfe6bb61e4abef2bbb7102765a"
+    // "MD5 checksum:    e0778ff7fb490fc2c9c56824f9ecf448 : verified"
+    // "MD5: e0778ff7fb490fc2c9c56824f9ecf448"
+    
+    let algorithms = ["md5", "sha1", "sha256", "sha512", "sha-1", "sha-256", "sha-512"];
+    
+    for alg in &algorithms {
+        if line_lower.contains(alg) {
+            // Try to extract the hash value
+            let re = Regex::new(r"[a-fA-F0-9]{32,128}").ok()?;
+            if let Some(m) = re.find(line) {
+                let hash = m.as_str().to_lowercase();
+                
+                // Check for verification status
+                let verified = if check_verified {
+                    if line_lower.contains(": verified") || line_lower.contains("verified") {
+                        Some(true)
+                    } else if line_lower.contains(": failed") || line_lower.contains("mismatch") {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                
+                let algo_name = match *alg {
+                    "md5" => "MD5",
+                    "sha1" | "sha-1" => "SHA-1",
+                    "sha256" | "sha-256" => "SHA-256",
+                    "sha512" | "sha-512" => "SHA-512",
+                    _ => *alg,
+                };
+                
+                return Some(StoredHash {
+                    algorithm: algo_name.to_string(),
+                    hash,
+                    verified,
+                    timestamp: None,  // Will be set by caller from log file context
+                    source: Some("companion".to_string()),
+                });
+            }
+        }
+    }
+    
+    None
+}
+
+/// Parse a key: value line
+fn parse_key_value(line: &str) -> Option<(String, String)> {
+    // Match patterns like "Case Number: 12345" or "Examiner:  John Doe"
+    if let Some(colon_pos) = line.find(':') {
+        let key = line[..colon_pos].trim();
+        let value = line[colon_pos + 1..].trim();
+        if !key.is_empty() && !value.is_empty() {
+            return Some((key.to_string(), value.to_string()));
+        }
+    }
+    None
+}
+
+/// Parse "Forensic MD5" style per-segment hash log files
+/// Format:
+/// * SCHARDT.001: From: 0, To: 1389747, Size: 1301248, MD5 Value:
+/// * ...28A9B613 D6EEFE8A 0515EF0A 675BDEBD...
+fn parse_forensic_md5_segments(content: &str) -> Option<Vec<SegmentHash>> {
+    let mut segments: Vec<SegmentHash> = Vec::new();
+    let mut current_segment: Option<SegmentHash> = None;
+    
+    for line in content.lines() {
+        let line = line.trim();
+        
+        // Skip empty lines
+        if line.is_empty() {
+            continue;
+        }
+        
+        // Look for segment header: "* SEGMENT.XXX: From: X, To: Y, Size: Z, MD5 Value:"
+        if line.starts_with("* ") && line.contains(": From:") {
+            // Save previous segment if any
+            if let Some(seg) = current_segment.take() {
+                if !seg.hash.is_empty() {
+                    segments.push(seg);
+                }
+            }
+            
+            // Parse the segment header
+            // Format: "* SCHARDT.001: From: 0, To: 1389747, Size: 1301248, MD5 Value:"
+            let inner = &line[2..]; // Skip "* "
+            
+            // Extract segment name (before first ':')
+            let segment_name = inner.split(':').next()?.trim().to_string();
+            
+            // Extract segment number from name
+            let segment_number = extract_segment_number(&segment_name).unwrap_or(0);
+            
+            // Parse From/To/Size values
+            let offset_from = extract_numeric_value(inner, "From:");
+            let offset_to = extract_numeric_value(inner, "To:");
+            let size = extract_numeric_value(inner, "Size:");
+            
+            current_segment = Some(SegmentHash {
+                segment_name,
+                segment_number,
+                algorithm: "MD5".to_string(),
+                hash: String::new(),
+                offset_from,
+                offset_to,
+                size,
+                verified: None,
+            });
+            continue;
+        }
+        
+        // Look for hash value line: "* ...28A9B613 D6EEFE8A 0515EF0A 675BDEBD..."
+        if line.starts_with("* ...") && current_segment.is_some() {
+            // Extract hex hash (may be space-separated)
+            let hash_part = &line[5..]; // Skip "* ..."
+            let hash_part = hash_part.trim_end_matches("...");
+            
+            // Remove spaces and convert to lowercase
+            let hash: String = hash_part
+                .chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .collect::<String>()
+                .to_lowercase();
+            
+            if hash.len() >= 32 {
+                if let Some(seg) = current_segment.as_mut() {
+                    seg.hash = hash;
+                }
+            }
+        }
+    }
+    
+    // Don't forget the last segment
+    if let Some(seg) = current_segment {
+        if !seg.hash.is_empty() {
+            segments.push(seg);
+        }
+    }
+    
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+/// Extract segment number from segment name (e.g., "SCHARDT.001" -> 1)
+fn extract_segment_number(name: &str) -> Option<u32> {
+    // Try to find numeric extension
+    if let Some(dot_pos) = name.rfind('.') {
+        let ext = &name[dot_pos + 1..];
+        if let Ok(num) = ext.parse::<u32>() {
+            return Some(num);
+        }
+    }
+    None
+}
+
+/// Extract numeric value from a "Key: Value" pattern in a line
+fn extract_numeric_value(line: &str, key: &str) -> Option<u64> {
+    if let Some(pos) = line.find(key) {
+        let after_key = &line[pos + key.len()..];
+        // Find the number (may end at comma or end of string)
+        let num_str: String = after_key
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !num_str.is_empty() {
+            return num_str.parse().ok();
+        }
+    }
     None
 }

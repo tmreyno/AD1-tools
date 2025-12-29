@@ -3,16 +3,14 @@ use filetime::FileTime;
 use flate2::read::ZlibDecoder;
 use rayon::prelude::*;
 use serde::Serialize;
-use sha1::{Digest as Sha1Digest, Sha1};
-use sha2::{Sha256, Sha512};
-use blake2::Blake2b512;
-use blake3::Hasher as Blake3Hasher;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
+
+use crate::common::hash::{HashAlgorithm, compute_hash};
 
 const AD1_SIGNATURE: &[u8; 15] = b"ADSEGMENTEDFILE";
 const AD1_LOGICAL_MARGIN: u64 = 512;
@@ -159,7 +157,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<Ad1Info, String> {
 
 pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
     let mut session = Session::open(path)?;
-    let algo = parse_algorithm(algorithm)?;
+    let algo = HashAlgorithm::from_str(algorithm)?;
     let mut results = Vec::new();
     let root_items = session.root_items.clone();
     for item in &root_items {
@@ -833,62 +831,4 @@ fn copy_into_array<const N: usize>(value: &str, max_len: usize) -> Result<[u8; N
     Ok(buf)
 }
 
-/// Supported hash algorithms for file verification
-/// - MD5/SHA1: Compare against stored hashes in AD1 metadata
-/// - SHA256/SHA512: Forensic standard (NIST approved, court-accepted)
-/// - BLAKE3: Modern, extremely fast cryptographic hash
-/// - BLAKE2b: Fast cryptographic hash (used in many security applications)
-#[derive(Clone, Copy)]
-enum HashAlgorithm {
-    Md5,
-    Sha1,
-    Sha256,
-    Sha512,
-    Blake3,
-    Blake2,
-}
-
-fn parse_algorithm(algorithm: &str) -> Result<HashAlgorithm, String> {
-    match algorithm.trim().to_lowercase().as_str() {
-        "md5" => Ok(HashAlgorithm::Md5),
-        "sha1" | "sha-1" => Ok(HashAlgorithm::Sha1),
-        "sha256" | "sha-256" => Ok(HashAlgorithm::Sha256),
-        "sha512" | "sha-512" => Ok(HashAlgorithm::Sha512),
-        "blake3" => Ok(HashAlgorithm::Blake3),
-        "blake2" | "blake2b" => Ok(HashAlgorithm::Blake2),
-        _ => Err(format!("Unsupported hash algorithm: {}. Supported: md5, sha1, sha256, sha512, blake3, blake2", algorithm)),
-    }
-}
-
-/// Compute hash of data using specified algorithm
-fn compute_hash(data: &[u8], algorithm: HashAlgorithm) -> String {
-    match algorithm {
-        HashAlgorithm::Md5 => format!("{:x}", md5::compute(data)),
-        HashAlgorithm::Sha1 => {
-            let mut hasher = Sha1::new();
-            hasher.update(data);
-            hex::encode(hasher.finalize())
-        }
-        HashAlgorithm::Sha256 => {
-            let mut hasher = Sha256::new();
-            hasher.update(data);
-            hex::encode(hasher.finalize())
-        }
-        HashAlgorithm::Sha512 => {
-            let mut hasher = Sha512::new();
-            hasher.update(data);
-            hex::encode(hasher.finalize())
-        }
-        HashAlgorithm::Blake3 => {
-            let mut hasher = Blake3Hasher::new();
-            hasher.update(data);
-            hasher.finalize().to_hex().to_string()
-        }
-        HashAlgorithm::Blake2 => {
-            use blake2::Digest;
-            let mut hasher = Blake2b512::new();
-            hasher.update(data);
-            hex::encode(hasher.finalize())
-        }
-    }
-}
+// Hash algorithm and compute_hash now provided by crate::common::hash
