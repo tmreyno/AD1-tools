@@ -5,6 +5,7 @@ A desktop application for working with forensic disk image formats (AD1, E01, L0
 ## Features
 
 ### Main App
+
 - **AD1 Container Support**: Read and verify AccessData AD1 logical image files
 - **E01 Container Support**: Read Expert Witness Format (EnCase) files
 - **L01 Container Support**: Read Logical Evidence Format files
@@ -13,6 +14,7 @@ A desktop application for working with forensic disk image formats (AD1, E01, L0
 - **File Extraction**: Extract contents from logical containers
 
 ### E01 v3 Test (New!)
+
 - **libewf-Inspired Architecture**: Complete rewrite following libewf's proven design
 - **Performance Testing**: Benchmark against libewf's ewfverify
 - **Hash Verification**: MD5 and SHA1 with throughput metrics
@@ -22,16 +24,19 @@ A desktop application for working with forensic disk image formats (AD1, E01, L0
 ## Running the Application
 
 ### Development Mode
+
 ```bash
 npm run tauri dev
 ```
 
 This will:
+
 1. Start the Vite development server (frontend)
 2. Compile the Rust backend
 3. Launch the application window
 
 ### Production Build
+
 ```bash
 npm run tauri build
 ```
@@ -45,21 +50,25 @@ npm run tauri build
 5. **Compute MD5** to verify against libewf
 
 ### Test File
+
 Use the 4Dell Latitude CPi.E01 file:
+
 - Location: `/Users/terryreynolds/Downloads/4Dell Latitude CPi.E01`
 - Segments: 2 (E01 + E02)
 - Size: 4.5 GB
 - Expected MD5: `aee4fcd9301c03b3b054623ca261959a`
 
 ### Performance Comparison
-| Tool | Time | Throughput | MD5 Hash |
-|------|------|------------|----------|
-| libewf ewfverify | ~14.6s | ~331 MB/s | aee4fcd9... |
-| E01 v3 (Goal) | ~15-20s | 250-400 MB/s | aee4fcd9... |
+
+| Tool             | Time     | Throughput   | MD5 Hash     |
+|------------------|----------|--------------|--------------|
+| libewf ewfverify | ~14.6s   | ~331 MB/s    | aee4fcd9...  |
+| E01 v3 (Goal)    | ~15-20s  | 250-400 MB/s | aee4fcd9...  |
 
 ## Architecture
 
 ### Rust Backend (`src-tauri/src/`)
+
 - `lib.rs` - Tauri commands and application entry
 - `main.rs` - Application main entry point
 - `ad1.rs` - AD1 format implementation
@@ -69,6 +78,7 @@ Use the 4Dell Latitude CPi.E01 file:
 - `containers.rs` - Unified container interface
 
 ### Frontend (`src/`)
+
 - `App.tsx` - Main application interface
 - `E01V3Test.tsx` - **New E01 v3 testing interface**
 - `AppRouter.tsx` - Navigation between pages
@@ -79,6 +89,7 @@ Use the 4Dell Latitude CPi.E01 file:
 The new E01 v3 implementation replicates libewf's battle-tested architecture:
 
 ### File I/O Pool
+
 ```rust
 struct FileIoPool {
     file_paths: Vec<PathBuf>,
@@ -87,11 +98,13 @@ struct FileIoPool {
     max_open: usize,
 }
 ```
+
 - LRU caching of file handles
 - Prevents "too many open files" errors
 - Configurable max open files (default: 16)
 
 ### Segment Management
+
 ```rust
 struct SegmentFile {
     file_index: usize,
@@ -99,11 +112,13 @@ struct SegmentFile {
     sections: Vec<SegmentSection>,
 }
 ```
+
 - Per-segment metadata catalog
 - Section structure parsed once
 - Efficient segment lookup
 
 ### Global Chunk Table
+
 ```rust
 struct ChunkLocation {
     segment_index: usize,
@@ -111,11 +126,13 @@ struct ChunkLocation {
     offset: u64,
 }
 ```
+
 - O(1) chunk location lookup
 - No runtime searching required
 - Pre-built index for performance
 
 ### Chunk Cache
+
 ```rust
 struct ChunkCache {
     cache: HashMap<usize, Vec<u8>>,
@@ -123,6 +140,7 @@ struct ChunkCache {
     max_entries: usize,
 }
 ```
+
 - LRU cache for decompressed chunks
 - Reduces redundant decompression
 - Configurable cache size (default: 256 chunks)
@@ -130,6 +148,7 @@ struct ChunkCache {
 ## Development Status
 
 ### ✅ Completed
+
 - Tauri application framework
 - AD1, E01, L01 format parsers
 - File I/O Pool with LRU management
@@ -140,10 +159,12 @@ struct ChunkCache {
 - Test UI for E01 v3
 
 ### ⚠️ In Progress
+
 - Section walking across segment boundaries (needs global offset fix)
 - Performance optimization
 
 ### 📋 Planned
+
 - SHA1/SHA256 hashing
 - Raw dd image extraction
 - CRC per-chunk verification
@@ -168,16 +189,19 @@ Both should produce the same MD5 hash: `aee4fcd9301c03b3b054623ca261959a`
 ## Troubleshooting
 
 ### App Won't Start
+
 - Ensure Node.js and Rust are installed
 - Run `npm install` to install dependencies
 - Check that ports 1420 (Vite) and backend port are available
 
 ### E01 v3 Errors
+
 - Current implementation has a known issue with section offset handling
 - Works for single-segment files
 - Multi-segment support in progress (see E01_V3_ARCHITECTURE.md)
 
 ### Performance Issues
+
 - First run is slower due to cache warm-up
 - Subsequent runs benefit from chunk cache
 - SSD vs HDD makes a significant difference
