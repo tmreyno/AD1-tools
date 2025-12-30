@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "liblfx",
+  "productName": "FFX Check",
   "version": "0.1.0",
-  "identifier": "com.liblfx.app",
+  "identifier": "com.ffxcheck.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "liblfx",
+        "title": "FFX Check",
         "width": 1100,
         "height": 720,
         "minWidth": 960,

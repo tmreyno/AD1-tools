@@ -1,32 +1,25 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
-// Types
-type SegmentHeader = { signature: string; segment_index: number; segment_number: number; fragments_size: number; header_size: number; };
-type LogicalHeader = { signature: string; image_version: number; zlib_chunk_size: number; logical_metadata_addr: number; first_item_addr: number; data_source_name_length: number; ad_signature: string; data_source_name_addr: number; attrguid_footer_addr: number; locsguid_footer_addr: number; data_source_name: string; };
-type TreeEntry = { path: string; is_dir: boolean; size: number; item_type: number; };
-type VerifyEntry = { path: string; status: string; message?: string; };
-type DiscoveredFile = { path: string; filename: string; container_type: string; size: number; segment_count?: number; created?: string; modified?: string };
-type Ad1Info = { segment: SegmentHeader; logical: LogicalHeader; item_count: number; tree?: TreeEntry[]; };
-type E01Info = { format_version: string; segment_count: number; sector_count: number; bytes_per_sector: number; chunk_count: number; sectors_per_chunk: number; total_size: number; compression: string; case_number?: string; description?: string; examiner_name?: string; evidence_number?: string; notes?: string; acquiry_date?: string; system_date?: string; model?: string; serial_number?: string; stored_hashes?: StoredHash[]; };
-type L01Info = { format_version: number; case_info: string; examiner?: string; description?: string; file_count: number; total_size: number; };
-type RawInfo = { segment_count: number; total_size: number; segment_sizes: number[]; segment_names: string[]; first_segment: string; last_segment: string; };
-type StoredHash = { algorithm: string; hash: string; verified?: boolean | null; timestamp?: string | null; source?: string | null; };
-type SegmentHash = { segment_name: string; segment_number: number; algorithm: string; hash: string; offset_from?: number | null; offset_to?: number | null; size?: number | null; verified?: boolean | null; };
-type CompanionLogInfo = { log_path: string; created_by?: string; case_number?: string; evidence_number?: string; unique_description?: string; examiner?: string; notes?: string; acquisition_started?: string; acquisition_finished?: string; verification_started?: string; verification_finished?: string; stored_hashes: StoredHash[]; segment_list: string[]; segment_hashes: SegmentHash[]; };
-type ContainerInfo = { container: string; ad1?: Ad1Info | null; e01?: E01Info | null; l01?: L01Info | null; raw?: RawInfo | null; note?: string | null; companion_log?: CompanionLogInfo | null; };
-type HashAlgorithm = "md5" | "sha1" | "sha256" | "sha512" | "blake3" | "blake2" | "xxh3" | "xxh64" | "crc32";
-type SegmentHashResult = { segment_name: string; segment_number: number; segment_path: string; algorithm: string; computed_hash: string; expected_hash?: string | null; verified?: boolean | null; size: number; duration_secs: number; };
-type HashHistoryEntry = { algorithm: string; hash: string; timestamp: Date; source: "computed" | "stored" | "verified"; verified?: boolean | null; verified_against?: string | null; };
+// System stats interface
+interface SystemStats {
+  cpu_usage: number;
+  memory_used: number;
+  memory_total: number;
+  memory_percent: number;
+  app_cpu_usage: number;
+  app_memory: number;
+  app_threads: number;
+  cpu_cores: number;
+}
 
-const HASH_ALGORITHMS: { value: HashAlgorithm; label: string }[] = [
-  { value: "md5", label: "MD5" }, { value: "sha1", label: "SHA-1" }, { value: "sha256", label: "SHA-256" },
-  { value: "sha512", label: "SHA-512" }, { value: "blake3", label: "BLAKE3" }, { value: "blake2", label: "BLAKE2b" },
-  { value: "xxh3", label: "XXH3" }, { value: "xxh64", label: "XXH64" }, { value: "crc32", label: "CRC32" },
-];
+// Shared types and utilities
+import type { DiscoveredFile, TreeEntry, ContainerInfo, StoredHash, SegmentHashResult, HashHistoryEntry, HashAlgorithm, VerifyEntry } from "./types";
+import { HASH_ALGORITHMS } from "./types";
+import { formatBytes, normalizeError, typeIcon, typeClass } from "./utils";
 
 function App() {
   const [scanDir, setScanDir] = createSignal("");
@@ -49,6 +42,28 @@ function App() {
   const [segmentVerifyProgress, setSegmentVerifyProgress] = createSignal<{ segment: string; percent: number; completed: number; total: number } | null>(null);
   // Hash history state (per file)
   const [hashHistory, setHashHistory] = createSignal<Map<string, HashHistoryEntry[]>>(new Map());
+  // System stats state
+  const [systemStats, setSystemStats] = createSignal<SystemStats | null>(null);
+
+  // Listen for system stats events from backend (pushed every 2 seconds)
+  onMount(async () => {
+    // Get initial stats
+    try {
+      const stats = await invoke<SystemStats>("get_system_stats");
+      setSystemStats(stats);
+    } catch (e) {
+      console.error("Failed to get initial system stats:", e);
+    }
+    
+    // Listen for continuous updates
+    const unlisten = await listen<SystemStats>("system-stats", (event) => {
+      setSystemStats(event.payload);
+    });
+    
+    onCleanup(() => {
+      unlisten();
+    });
+  });
 
   const allFilesSelected = createMemo(() => { const files = discoveredFiles(); return files.length > 0 && files.every(f => selectedFiles().has(f.path)); });
   const selectedCount = createMemo(() => selectedFiles().size);
@@ -149,9 +164,9 @@ function App() {
     }
   };
   
-  // Load file info for a single file in background
+  // Load file info for a single file in background (uses fast path - headers only)
   const loadSingleFileInfo = (file: DiscoveredFile) => {
-    invoke<ContainerInfo>("logical_info", { inputPath: file.path, includeTree: false })
+    invoke<ContainerInfo>("logical_info_fast", { inputPath: file.path })
       .then(info => {
         setFileInfoMap(prev => { const m = new Map(prev); m.set(file.path, info); return m; });
       })
@@ -175,7 +190,16 @@ function App() {
   const loadAllInfo = async () => {
     setWorking(`Loading info for ${discoveredFiles().length} files...`);
     let loaded = 0;
-    for (const file of discoveredFiles()) { if (!fileInfoMap().has(file.path)) { try { await loadFileInfo(file, false); loaded++; } catch { } } }
+    for (const file of discoveredFiles()) { 
+      if (!fileInfoMap().has(file.path)) { 
+        try { 
+          // Use fast path for bulk loading - only headers, no tree parsing
+          const result = await invoke<ContainerInfo>("logical_info_fast", { inputPath: file.path });
+          setFileInfoMap(prev => { const m = new Map(prev); m.set(file.path, result); return m; });
+          loaded++; 
+        } catch { } 
+      } 
+    }
     setOk(`Loaded info for ${loaded} files`);
   };
 
@@ -414,7 +438,7 @@ function App() {
   return (
     <div class="app compact">
       <header class="header-bar">
-        <div class="brand"><span class="brand-icon">🔬</span><span class="brand-name">liblfx</span><span class="brand-tag">Forensic Container Explorer</span></div>
+        <div class="brand"><span class="brand-icon">🔬</span><span class="brand-name">FFX</span><span class="brand-tag">Forensic File Xplorer</span></div>
         <div class="header-status"><span class={`status-dot ${statusKind()}`} /><span class="status-text">{statusMessage()}</span></div>
       </header>
 
@@ -454,12 +478,13 @@ function App() {
                   <span class={`type-icon ${typeClass(file.container_type)}`} title={file.container_type}>{typeIcon(file.container_type)}</span>
                   <div class="file-info"><span class="file-name" title={file.path}>{file.filename}</span><span class="file-meta">{formatBytes(file.size)}<Show when={file.segment_count && file.segment_count > 1}><span class="seg-count">• {file.segment_count} segs</span></Show></span></div>
                   <div class="file-actions">
+                    <Show when={fileInfo()?.ad1?.item_count}><span class="item-count-badge" title={`${fileInfo()!.ad1!.item_count.toLocaleString()} items`}>📁{fileInfo()!.ad1!.item_count > 999 ? Math.round(fileInfo()!.ad1!.item_count / 1000) + "k" : fileInfo()!.ad1!.item_count}</span></Show>
                     <Show when={fileStatus()?.status === "hashing"}><span class="progress-mini">{fileStatus()!.progress.toFixed(0)}%</span></Show>
                     <Show when={fileHash()?.verified === true}><span class="hash-verified" title={`Verified: ${fileHash()!.algorithm} matches stored hash`}>✓</span></Show>
                     <Show when={fileHash()?.verified === false}><span class="hash-failed" title={`FAILED: ${fileHash()!.algorithm} does NOT match stored hash`}>✗</span></Show>
-                    <Show when={fileHash() && fileHash()?.verified === null}><span class="hash-done" title={`Computed: ${fileHash()!.algorithm}`}>✓</span></Show>
-                    <Show when={(fileInfo()?.companion_log?.stored_hashes?.length ?? 0) > 0 || (fileInfo()?.e01?.stored_hashes?.length ?? 0) > 0}><span class="stored-badge" title="Has stored hashes">📜</span></Show>
-                    <button class="action-btn" onClick={(e) => { e.stopPropagation(); hashSingleFile(file); }} disabled={busy()} title="Hash this file">#</button>
+                    <Show when={fileHash() && fileHash()?.verified === null}><span class="hash-computed" title={`Computed: ${fileHash()!.algorithm}`}>🔐</span></Show>
+                    <Show when={(fileInfo()?.companion_log?.stored_hashes?.length ?? 0) > 0 || (fileInfo()?.e01?.stored_hashes?.length ?? 0) > 0}><span class="stored-badge" title="Has stored hashes">📜{(fileInfo()?.e01?.stored_hashes?.length ?? 0) + (fileInfo()?.companion_log?.stored_hashes?.length ?? 0)}</span></Show>
+                    <button class="action-btn hash-action" onClick={(e) => { e.stopPropagation(); hashSingleFile(file); }} disabled={busy()} title="Hash this file">🔐</button>
                   </div>
                   <Show when={isHovered() && !isActive()}>
                     <div class="file-tooltip">
@@ -666,6 +691,24 @@ function App() {
                     </div>}</Show>
                     <Show when={info()!.l01}>{(l01) => <div class="info-compact"><div class="info-row"><span class="info-label">Format</span><span class="info-value">{l01().format_version}</span></div><div class="info-row"><span class="info-label">File Count</span><span class="info-value">{l01().file_count}</span></div><div class="info-row"><span class="info-label">Total Size</span><span class="info-value">{formatBytes(l01().total_size)}</span></div><div class="info-row"><span class="info-label">Case</span><span class="info-value">{l01().case_info}</span></div><Show when={l01().examiner}><div class="info-row"><span class="info-label">Examiner</span><span class="info-value">{l01().examiner}</span></div></Show><Show when={l01().description}><div class="info-row full-width"><span class="info-label">Description</span><span class="info-value">{l01().description}</span></div></Show></div>}</Show>
                     <Show when={info()!.raw}>{(raw) => <div class="info-compact"><div class="info-row"><span class="info-label">Segments</span><span class="info-value">{raw().segment_count} ({raw().first_segment} → {raw().last_segment})</span></div><div class="info-row"><span class="info-label">Total Size</span><span class="info-value">{formatBytes(raw().total_size)}</span></div><Show when={raw().segment_count > 1}><div class="info-row full-width"><span class="info-label">Segment Files</span><span class="info-value seg-list">{raw().segment_names.slice(0, 5).join(", ")}{raw().segment_count > 5 ? ` (+${raw().segment_count - 5} more)` : ""}</span></div></Show></div>}</Show>
+                    <Show when={info()!.archive}>{(archive) => <div class="info-compact">
+                      <div class="info-row"><span class="info-label">Format</span><span class="info-value">{archive().format}{archive().version ? ` v${archive().version}` : ""}</span></div>
+                      <div class="info-row"><span class="info-label">Segments</span><span class="info-value">{archive().segment_count} ({archive().first_segment} → {archive().last_segment})</span></div>
+                      <div class="info-row"><span class="info-label">Total Size</span><span class="info-value">{formatBytes(archive().total_size)}</span></div>
+                      <Show when={archive().entry_count}><div class="info-row"><span class="info-label">Entries</span><span class="info-value">{archive().entry_count}</span></div></Show>
+                      <Show when={archive().aes_encrypted}><div class="info-row highlight"><span class="info-label">AES Encrypted</span><span class="info-value">Yes</span></div></Show>
+                      <Show when={archive().encrypted_headers}><div class="info-row highlight"><span class="info-label">Encrypted Headers</span><span class="info-value">Filenames Hidden</span></div></Show>
+                      <Show when={archive().start_header_crc_valid !== undefined && archive().start_header_crc_valid !== null}>
+                        <div class={`info-row ${archive().start_header_crc_valid ? "" : "highlight"}`}>
+                          <span class="info-label">Header CRC</span>
+                          <span class="info-value">{archive().start_header_crc_valid ? "✓ Valid" : "✗ Invalid"}</span>
+                        </div>
+                      </Show>
+                      <Show when={archive().central_dir_offset}><div class="info-row"><span class="info-label">Central Dir</span><span class="info-value">@ {archive().central_dir_offset?.toLocaleString()} ({archive().central_dir_size?.toLocaleString()} bytes)</span></div></Show>
+                      <Show when={archive().next_header_offset}><div class="info-row"><span class="info-label">Next Header</span><span class="info-value">@ 0x{archive().next_header_offset?.toString(16).toUpperCase()} ({archive().next_header_size?.toLocaleString()} bytes)</span></div></Show>
+                      <Show when={archive().next_header_crc}><div class="info-row"><span class="info-label">Next Header CRC</span><span class="info-value">0x{archive().next_header_crc?.toString(16).toUpperCase().padStart(8, '0')}</span></div></Show>
+                      <Show when={archive().segment_count > 1}><div class="info-row full-width"><span class="info-label">Segment Files</span><span class="info-value seg-list">{archive().segment_names.slice(0, 5).join(", ")}{archive().segment_count > 5 ? ` (+${archive().segment_count - 5} more)` : ""}</span></div></Show>
+                    </div>}</Show>
                     <Show when={info()!.companion_log}>{(log) => <div class="info-compact companion-meta"><Show when={log().created_by}><div class="info-row"><span class="info-label">Created By</span><span class="info-value">{log().created_by}</span></div></Show><Show when={log().case_number}><div class="info-row highlight"><span class="info-label">Case #</span><span class="info-value">{log().case_number}</span></div></Show><Show when={log().evidence_number}><div class="info-row highlight"><span class="info-label">Evidence #</span><span class="info-value">{log().evidence_number}</span></div></Show><Show when={log().examiner}><div class="info-row"><span class="info-label">Examiner</span><span class="info-value">{log().examiner}</span></div></Show><Show when={log().unique_description}><div class="info-row full-width"><span class="info-label">Source</span><span class="info-value">{log().unique_description}</span></div></Show><Show when={log().acquisition_started}><div class="info-row"><span class="info-label">Acquired</span><span class="info-value">{log().acquisition_started}</span></div></Show><Show when={log().notes}><div class="info-row full-width"><span class="info-label">Notes</span><span class="info-value notes">{log().notes}</span></div></Show></div>}</Show>
                   </div></Show>
                   <Show when={tree().length > 0}><div class="compact-section"><div class="section-header-compact"><span class="section-title">📁 File Tree ({tree().length})</span><input type="text" class="tree-filter-sm" placeholder="Filter..." value={treeFilter()} onInput={(e) => setTreeFilter(e.currentTarget.value)} /></div><div class="tree-list-compact"><For each={filteredTree()}>{(entry) => <div class={`tree-row ${entry.is_dir ? "dir" : "file"}`}><span class="tree-icon">{entry.is_dir ? "📁" : "📄"}</span><span class="tree-path">{entry.path}</span><span class="tree-size">{entry.is_dir ? "" : formatBytes(entry.size)}</span></div>}</For><Show when={tree().length > 500}><div class="tree-truncated">Showing first 500 of {tree().length} items</div></Show></div></div></Show>
@@ -682,13 +725,32 @@ function App() {
           </Show>
         </main>
       </div>
+
+      <footer class="status-bar">
+        <div class={`status-message-row ${statusKind()}`}>
+          <span class="status-icon">{statusKind() === "working" ? "⏳" : statusKind() === "ok" ? "✓" : statusKind() === "error" ? "✗" : "○"}</span>
+          <span class="status-text">{statusMessage()}</span>
+          <div class="status-stats">
+            <Show when={discoveredFiles().length > 0}>
+              <span class="stat-item">📁 {discoveredFiles().length}</span>
+              <span class="stat-item">💾 {formatBytes(totalSize())}</span>
+            </Show>
+            <Show when={selectedCount() > 0}>
+              <span class="stat-item">☑ {selectedCount()}</span>
+            </Show>
+          </div>
+          <div class="system-stats">
+            <Show when={systemStats()}>
+              <span class="stat-item" title={`System CPU: ${systemStats()!.cpu_usage.toFixed(1)}%`}>🖥️ {systemStats()!.app_cpu_usage.toFixed(0)}%</span>
+              <span class="stat-item" title={`${systemStats()!.cpu_cores} cores available`}>⚙️ {systemStats()!.cpu_cores}</span>
+              <span class="stat-item" title={`App Memory: ${formatBytes(systemStats()!.app_memory)}\nSystem: ${formatBytes(systemStats()!.memory_used)} / ${formatBytes(systemStats()!.memory_total)}`}>🧠 {formatBytes(systemStats()!.app_memory)}</span>
+            </Show>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
 
-function formatBytes(value: number): string { if (!value) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1); return `${(value / Math.pow(1024, i)).toFixed(value / Math.pow(1024, i) < 10 ? 2 : 1)} ${units[i]}`; }
-function normalizeError(err: unknown): string { if (!err) return "Unknown error"; if (typeof err === "string") return err; if (typeof err === "object" && "message" in err) return String((err as { message: string }).message); return JSON.stringify(err); }
-function typeIcon(type: string): string { const t = type.toLowerCase(); if (t.includes("ad1")) return "📦"; if (t.includes("e01") || t.includes("encase")) return "💿"; if (t.includes("l01")) return "📋"; if (t.includes("raw") || t.includes("dd")) return "💾"; if (t.includes("tar")) return "📚"; return "📄"; }
-function typeClass(type: string): string { const t = type.toLowerCase(); if (t.includes("ad1")) return "type-ad1"; if (t.includes("e01") || t.includes("encase")) return "type-e01"; if (t.includes("l01")) return "type-l01"; if (t.includes("raw") || t.includes("dd")) return "type-raw"; if (t.includes("tar")) return "type-tar"; return "type-other"; }
 
 export default App;

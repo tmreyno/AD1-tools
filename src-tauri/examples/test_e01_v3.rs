@@ -1,7 +1,7 @@
 // Test EWF (Expert Witness Format) implementation and compare with libewf results
 // Run with: cargo run --example test_e01_v3
 
-use liblfx_lib::ewf;
+use ffx_check_lib::ewf;
 use std::time::Instant;
 
 fn main() {

@@ -1,3 +1,73 @@
+//! AD1 (AccessData Logical Image) Parser
+//!
+//! This module provides parsing and verification for AccessData's AD1 logical
+//! evidence container format, commonly used in FTK (Forensic Toolkit).
+//!
+//! ## AD1 Format Structure
+//!
+//! AD1 files are **segmented logical containers** with zlib-compressed content:
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────────┐
+//! │ Segment Header (64 bytes)                                    │
+//! │  - Signature: "ADSEGMENTEDFILE" (15 bytes)                  │
+//! │  - Segment Index (u32)                                       │
+//! │  - Segment Number (u32) - total segment count               │
+//! │  - Fragments Size (u32)                                      │
+//! │  - Header Size (u32)                                         │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │ Logical Header (within 512 bytes after segment header)       │
+//! │  - Signature "AD\0\0" (4 bytes)                             │
+//! │  - Image Version (u32)                                       │
+//! │  - Zlib Chunk Size (u32)                                     │
+//! │  - Logical Metadata Address (u64)                            │
+//! │  - First Item Address (u64)                                  │
+//! │  - Data Source Name                                          │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │ Item Chain (linked list structure)                           │
+//! │  - Each item: next_addr, child_addr, metadata_addr           │
+//! │  - Item type: 0x05 = folder, others = files                 │
+//! │  - Zlib-compressed data at zlib_metadata_addr                │
+//! └──────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Multi-Segment Support
+//!
+//! AD1 containers can span multiple files (.ad1, .ad2, .ad3, etc.):
+//! - First segment contains all headers and metadata structure
+//! - Subsequent segments contain additional compressed data blocks
+//! - Segment number in header indicates total segment count
+//!
+//! ## Hash Verification
+//!
+//! AD1 stores per-file hashes in metadata blocks:
+//! - Hash category: `0x01` (HASH_INFO)
+//! - MD5: key `0x5001`
+//! - SHA1: key `0x5002`
+//!
+//! ## Forensic Notes
+//!
+//! - AD1 is a **logical** container (preserves file/folder structure)
+//! - Does NOT preserve disk geometry or unallocated space
+//! - Timestamps stored as Windows FILETIME (100ns intervals since 1601)
+//! - All multi-byte values are little-endian
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! // Get container info with file tree
+//! let info = ad1::info("/path/to/evidence.ad1", true)?;
+//!
+//! // Fast info (headers only, no tree parsing)
+//! let info_fast = ad1::info_fast("/path/to/evidence.ad1")?;
+//!
+//! // Verify file hashes
+//! let results = ad1::verify("/path/to/evidence.ad1", "sha1")?;
+//!
+//! // Extract to output directory
+//! ad1::extract("/path/to/evidence.ad1", "/output/dir")?;
+//! ```
+
 use chrono::{Local, NaiveDateTime, TimeZone};
 use filetime::FileTime;
 use flate2::read::ZlibDecoder;
@@ -9,8 +79,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tracing::{debug, trace, warn, info, instrument};
 
 use crate::common::hash::{HashAlgorithm, compute_hash};
+use crate::common::binary::{read_u32_at, read_u64_at, read_string_at};
 
 const AD1_SIGNATURE: &[u8; 15] = b"ADSEGMENTEDFILE";
 const AD1_LOGICAL_MARGIN: u64 = 512;
@@ -71,6 +143,7 @@ pub struct Ad1Info {
     pub logical: LogicalHeaderInfo,
     pub item_count: u64,
     pub tree: Option<Vec<TreeEntry>>,
+    pub segment_files: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -134,7 +207,75 @@ struct Session {
     cache_order: Vec<u64>,  // LRU order tracking
 }
 
+/// Count total files (non-folders) in item tree for progress reporting
+fn count_files(items: &[Item]) -> usize {
+    items.iter().map(|item| {
+        let self_count = if item.item_type != AD1_FOLDER_SIGNATURE { 1 } else { 0 };
+        self_count + count_files(&item.children)
+    }).sum()
+}
+
+/// Fast info - only reads headers, doesn't parse full item tree
+/// Use this for quick container detection/display
+/// Get list of segment file names for an AD1 container
+fn get_segment_files(path: &str, segment_count: u32) -> Vec<String> {
+    let path_obj = Path::new(path);
+    let parent = path_obj.parent();
+    let stem = path_obj.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    
+    let mut segments = Vec::new();
+    for i in 1..=segment_count {
+        let segment_name = format!("{}.ad{}", stem, i);
+        // Check if file exists
+        if let Some(parent_dir) = parent {
+            let segment_path = parent_dir.join(&segment_name);
+            if segment_path.exists() {
+                segments.push(segment_name);
+            }
+        } else {
+            segments.push(segment_name);
+        }
+    }
+    segments
+}
+
+#[instrument]
+pub fn info_fast(path: &str) -> Result<Ad1Info, String> {
+    debug!("Getting fast AD1 info (headers only)");
+    validate_input(path)?;
+    
+    let mut file = File::open(path)
+        .map_err(|e| format!("Failed to open AD1 file '{path}': {e}"))?;
+    
+    let segment_header = read_segment_header(&mut file)?;
+    let logical_header = read_logical_header(&mut file)?;
+    
+    let segment_info = segment_header_info(&segment_header);
+    let logical_info = logical_header_info(&logical_header);
+    
+    // Get segment file names
+    let segment_files = if segment_header.segment_number > 1 {
+        Some(get_segment_files(path, segment_header.segment_number))
+    } else {
+        None
+    };
+    
+    debug!(segments = segment_header.segment_number, "AD1 fast info loaded");
+    
+    Ok(Ad1Info {
+        segment: segment_info,
+        logical: logical_info,
+        item_count: 0, // Unknown without parsing tree
+        tree: None,
+        segment_files,
+    })
+}
+
+#[instrument(skip(include_tree), fields(include_tree))]
 pub fn info(path: &str, include_tree: bool) -> Result<Ad1Info, String> {
+    debug!("Opening AD1 file for info");
     let session = Session::open(path)?;
     let segment_info = segment_header_info(&session.segment_header);
     let logical_info = logical_header_info(&session.logical_header);
@@ -142,41 +283,91 @@ pub fn info(path: &str, include_tree: bool) -> Result<Ad1Info, String> {
     let tree = if include_tree {
         let mut entries = Vec::new();
         collect_tree(&session.root_items, "", &mut entries);
+        debug!(entry_count = entries.len(), "Built file tree");
         Some(entries)
     } else {
         None
     };
 
+    // Get segment file names
+    let segment_files = if session.segment_header.segment_number > 1 {
+        Some(get_segment_files(path, session.segment_header.segment_number))
+    } else {
+        None
+    };
+
+    info!(item_count = session.item_counter, "AD1 info loaded");
     Ok(Ad1Info {
         segment: segment_info,
         logical: logical_info,
         item_count: session.item_counter,
         tree,
+        segment_files,
     })
 }
 
 pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
+    verify_with_progress(path, algorithm, |_, _| {})
+}
+
+/// Verify AD1 file hashes with progress callback
+/// Progress callback receives (current_file, total_files)
+#[instrument(skip(progress_callback))]
+pub fn verify_with_progress<F>(path: &str, algorithm: &str, mut progress_callback: F) -> Result<Vec<VerifyEntry>, String>
+where
+    F: FnMut(usize, usize)
+{
+    debug!("Starting AD1 verification");
     let mut session = Session::open(path)?;
     let algo = HashAlgorithm::from_str(algorithm)?;
     let mut results = Vec::new();
     let root_items = session.root_items.clone();
+    
+    // Count total files for progress reporting
+    let total_files = count_files(&root_items);
+    debug!(total_files, "Verifying files");
+    let mut current_file = 0usize;
+    
     for item in &root_items {
-        session.verify_item(item, "", algo, &mut results)?;
+        session.verify_item_with_progress(item, "", algo, &mut results, &mut current_file, total_files, &mut progress_callback)?;
     }
+    
+    let passed = results.iter().filter(|r| r.status == "PASS").count();
+    let failed = results.iter().filter(|r| r.status == "FAIL").count();
+    info!(passed, failed, total_files, "AD1 verification complete");
+    
     Ok(results)
 }
 
 pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
+    extract_with_progress(path, output_dir, |_, _| {})
+}
+
+/// Extract AD1 files with progress callback
+/// Progress callback receives (current_file, total_files)
+#[instrument(skip(progress_callback))]
+pub fn extract_with_progress<F>(path: &str, output_dir: &str, mut progress_callback: F) -> Result<(), String>
+where
+    F: FnMut(usize, usize)
+{
     if output_dir.trim().is_empty() {
         return Err("Output directory is required".to_string());
     }
+    debug!("Starting AD1 extraction");
     let mut session = Session::open(path)?;
     fs::create_dir_all(output_dir)
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
     let root_items = session.root_items.clone();
+    
+    // Count total files for progress reporting
+    let total_files = count_files(&root_items);
+    debug!(total_files, output_dir, "Extracting files");
+    let mut current_file = 0usize;
+    
     for item in &root_items {
-        session.extract_item(item, Path::new(output_dir))?;
+        session.extract_item_with_progress(item, Path::new(output_dir), &mut current_file, total_files, &mut progress_callback)?;
     }
+    info!(total_files, "AD1 extraction complete");
     Ok(())
 }
 
@@ -190,11 +381,14 @@ pub fn is_ad1(path: &str) -> Result<bool, String> {
     let mut signature = [0u8; 16];
     file.read_exact(&mut signature)
         .map_err(|e| format!("Failed to read file signature: {e}"))?;
-    Ok(&signature[..15] == AD1_SIGNATURE)
+    let is_ad1 = &signature[..15] == AD1_SIGNATURE;
+    trace!(path, is_ad1, "AD1 signature check");
+    Ok(is_ad1)
 }
 
 impl Session {
     fn open(path: &str) -> Result<Self, String> {
+        trace!(path, "Opening AD1 session");
         validate_input(path)?;
         let mut header_file = File::open(path)
             .map_err(|e| format!("Failed to open AD1 file '{path}': {e}"))?;
@@ -516,6 +710,7 @@ impl Session {
         self.cache_order.push(item_id);
     }
 
+    #[allow(dead_code)]
     fn verify_item(
         &mut self,
         item: &Item,
@@ -523,6 +718,22 @@ impl Session {
         algorithm: HashAlgorithm,
         out: &mut Vec<VerifyEntry>,
     ) -> Result<(), String> {
+        self.verify_item_with_progress(item, parent_path, algorithm, out, &mut 0, 0, &mut |_, _| {})
+    }
+
+    fn verify_item_with_progress<F>(
+        &mut self,
+        item: &Item,
+        parent_path: &str,
+        algorithm: HashAlgorithm,
+        out: &mut Vec<VerifyEntry>,
+        current: &mut usize,
+        total: usize,
+        progress_callback: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(usize, usize)
+    {
         let path = join_path(parent_path, &item.name);
         if item.item_type != AD1_FOLDER_SIGNATURE {
             // For MD5/SHA1, compare against stored hash in AD1 metadata
@@ -532,7 +743,8 @@ impl Session {
                 HashAlgorithm::Sha1 => find_hash(&item.metadata, SHA1_HASH),
                 // AD1 only stores MD5 and SHA1, other algorithms compute-only
                 HashAlgorithm::Sha256 | HashAlgorithm::Sha512 | 
-                HashAlgorithm::Blake3 | HashAlgorithm::Blake2 => None,
+                HashAlgorithm::Blake3 | HashAlgorithm::Blake2 |
+                HashAlgorithm::Xxh3 | HashAlgorithm::Xxh64 | HashAlgorithm::Crc32 => None,
             };
             
             let data = self.read_file_data(item)?;
@@ -556,16 +768,35 @@ impl Session {
                 path: path.clone(),
                 status: status.to_string(),
             });
+            
+            // Report progress
+            *current += 1;
+            progress_callback(*current, total);
         }
 
         for child in &item.children {
-            self.verify_item(child, &path, algorithm, out)?;
+            self.verify_item_with_progress(child, &path, algorithm, out, current, total, progress_callback)?;
         }
 
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn extract_item(&mut self, item: &Item, output_dir: &Path) -> Result<(), String> {
+        self.extract_item_with_progress(item, output_dir, &mut 0, 0, &mut |_, _| {})
+    }
+
+    fn extract_item_with_progress<F>(
+        &mut self,
+        item: &Item,
+        output_dir: &Path,
+        current: &mut usize,
+        total: usize,
+        progress_callback: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(usize, usize)
+    {
         let item_path = output_dir.join(&item.name);
         if item.item_type == AD1_FOLDER_SIGNATURE {
             fs::create_dir_all(&item_path)
@@ -581,10 +812,14 @@ impl Session {
                 .map_err(|e| format!("Failed to create file {:?}: {e}", item_path))?;
             file.write_all(&data)
                 .map_err(|e| format!("Failed to write file {:?}: {e}", item_path))?;
+            
+            // Report progress
+            *current += 1;
+            progress_callback(*current, total);
         }
 
         for child in &item.children {
-            self.extract_item(child, &item_path)?;
+            self.extract_item_with_progress(child, &item_path, current, total, progress_callback)?;
         }
 
         apply_metadata(&item_path, &item.metadata)?;
@@ -736,15 +971,6 @@ fn validate_input(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn read_u32_at(file: &mut File, offset: u64) -> Result<u32, String> {
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| format!("Failed to seek input file: {e}"))?;
-    let mut buf = [0u8; 4];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read input file: {e}"))?;
-    Ok(u32::from_le_bytes(buf))
-}
-
 fn build_segment_path(base: &str, index: u32) -> String {
     if base.is_empty() {
         return base.to_string();
@@ -802,27 +1028,6 @@ fn read_logical_header(file: &mut File) -> Result<LogicalHeader, String> {
     })
 }
 
-fn read_string_at(file: &mut File, offset: u64, length: usize) -> Result<String, String> {
-    if length == 0 {
-        return Ok(String::new());
-    }
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| format!("Failed to seek input file: {e}"))?;
-    let mut buf = vec![0u8; length];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read input file: {e}"))?;
-    Ok(bytes_to_string(&buf))
-}
-
-fn read_u64_at(file: &mut File, offset: u64) -> Result<u64, String> {
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| format!("Failed to seek input file: {e}"))?;
-    let mut buf = [0u8; 8];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read input file: {e}"))?;
-    Ok(u64::from_le_bytes(buf))
-}
-
 fn copy_into_array<const N: usize>(value: &str, max_len: usize) -> Result<[u8; N], String> {
     let mut buf = [0u8; N];
     let bytes = value.as_bytes();
@@ -832,3 +1037,105 @@ fn copy_into_array<const N: usize>(value: &str, max_len: usize) -> Result<[u8; N
 }
 
 // Hash algorithm and compute_hash now provided by crate::common::hash
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_segment_path() {
+        assert_eq!(build_segment_path("/path/to/file.ad1", 1), "/path/to/file.ad1");
+        assert_eq!(build_segment_path("/path/to/file.ad1", 2), "/path/to/file.ad2");
+        assert_eq!(build_segment_path("/path/to/file.ad1", 3), "/path/to/file.ad3");
+        assert_eq!(build_segment_path("/path/to/file.ad1", 10), "/path/to/file.ad10");
+        assert_eq!(build_segment_path("", 1), "");
+    }
+
+    #[test]
+    fn test_join_path() {
+        assert_eq!(join_path("", "file.txt"), "file.txt");
+        assert_eq!(join_path("folder", ""), "folder");
+        assert_eq!(join_path("folder", "file.txt"), "folder/file.txt");
+        assert_eq!(join_path("a/b", "c.txt"), "a/b/c.txt");
+    }
+
+    #[test]
+    fn test_count_files() {
+        // Empty tree
+        let empty: Vec<Item> = vec![];
+        assert_eq!(count_files(&empty), 0);
+
+        // Single file
+        let single_file = vec![Item {
+            id: 1,
+            name: "file.txt".to_string(),
+            item_type: 0,  // Not a folder
+            decompressed_size: 100,
+            zlib_metadata_addr: 0,
+            metadata: vec![],
+            children: vec![],
+        }];
+        assert_eq!(count_files(&single_file), 1);
+
+        // Single folder (should not count)
+        let single_folder = vec![Item {
+            id: 1,
+            name: "folder".to_string(),
+            item_type: AD1_FOLDER_SIGNATURE,
+            decompressed_size: 0,
+            zlib_metadata_addr: 0,
+            metadata: vec![],
+            children: vec![],
+        }];
+        assert_eq!(count_files(&single_folder), 0);
+
+        // Folder with files
+        let folder_with_files = vec![Item {
+            id: 1,
+            name: "folder".to_string(),
+            item_type: AD1_FOLDER_SIGNATURE,
+            decompressed_size: 0,
+            zlib_metadata_addr: 0,
+            metadata: vec![],
+            children: vec![
+                Item {
+                    id: 2,
+                    name: "file1.txt".to_string(),
+                    item_type: 0,
+                    decompressed_size: 100,
+                    zlib_metadata_addr: 0,
+                    metadata: vec![],
+                    children: vec![],
+                },
+                Item {
+                    id: 3,
+                    name: "file2.txt".to_string(),
+                    item_type: 0,
+                    decompressed_size: 200,
+                    zlib_metadata_addr: 0,
+                    metadata: vec![],
+                    children: vec![],
+                },
+            ],
+        }];
+        assert_eq!(count_files(&folder_with_files), 2);
+    }
+
+    #[test]
+    fn test_segment_span() {
+        // segment_span = fragments_size * SEGMENT_BLOCK_SIZE - AD1_LOGICAL_MARGIN
+        assert_eq!(segment_span(0x10000), SEGMENT_BLOCK_SIZE * 0x10000 - AD1_LOGICAL_MARGIN);
+        assert_eq!(segment_span(1), SEGMENT_BLOCK_SIZE - AD1_LOGICAL_MARGIN);
+        assert_eq!(segment_span(0), 0);  // saturating_sub handles underflow
+    }
+
+    #[test]
+    fn test_copy_into_array() {
+        let result: [u8; 4] = copy_into_array("test", 4).unwrap();
+        assert_eq!(&result, b"test");
+
+        let result: [u8; 8] = copy_into_array("hi", 8).unwrap();
+        assert_eq!(&result[..2], b"hi");
+        assert_eq!(&result[2..], &[0, 0, 0, 0, 0, 0]);
+    }
+}

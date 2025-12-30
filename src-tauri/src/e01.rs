@@ -10,6 +10,11 @@ use flate2::read::ZlibDecoder;
 use crc32fast::Hasher as Crc32;
 use sha1::Digest as Sha1Digest;
 
+use crate::common::binary::{read_u8, read_u32_le, read_u64_le};
+
+// Import tracing macros
+use tracing::{debug, trace, warn, info};
+
 // EWF Format Constants
 const EWF_SIGNATURE: &[u8; 8] = b"EVF\x09\x0d\x0a\xff\x00";
 const EWF2_SIGNATURE: &[u8; 8] = b"EVF2\x0d\x0a\x81\x00";
@@ -257,8 +262,8 @@ fn read_section_descriptor(file: &mut File, offset: u64) -> Result<SectionDescri
     file.read_exact(&mut section_type)
         .map_err(|e| format!("Failed to read section type: {e}"))?;
     
-    let next_offset = read_u64(file)?;
-    let size = read_u64(file)?;
+    let next_offset = read_u64_le(file)?;
+    let size = read_u64_le(file)?;
     
     Ok(SectionDescriptor {
         section_type,
@@ -296,9 +301,9 @@ fn read_volume_section(file: &mut File, offset: u64) -> Result<VolumeSection, St
         file.seek(SeekFrom::Current(3))
             .map_err(|e| format!("Failed to skip padding: {e}"))?; // padding
         
-        let sector_count = read_u32(file)? as u64;
-        let sectors_per_chunk = read_u32(file)?;
-        let bytes_per_sector = read_u32(file)?;
+        let sector_count = read_u32_le(file)? as u64;
+        let sectors_per_chunk = read_u32_le(file)?;
+        let bytes_per_sector = read_u32_le(file)?;
         
         let chunk_count = if sectors_per_chunk > 0 {
             ((sector_count + sectors_per_chunk as u64 - 1) / sectors_per_chunk as u64) as u32
@@ -325,14 +330,14 @@ fn read_volume_section(file: &mut File, offset: u64) -> Result<VolumeSection, St
         file.seek(SeekFrom::Current(4))
             .map_err(|e| format!("Failed to skip padding: {e}"))?;
         
-        let chunk_count = read_u32(file)?;
-        let sectors_per_chunk = read_u32(file)?;
-        let bytes_per_sector = read_u32(file)?;
-        let sector_count = read_u64(file)?;
+        let chunk_count = read_u32_le(file)?;
+        let sectors_per_chunk = read_u32_le(file)?;
+        let bytes_per_sector = read_u32_le(file)?;
+        let sector_count = read_u64_le(file)?;
         
-        let chs_cylinders = read_u32(file)?;
-        let chs_heads = read_u32(file)?;
-        let chs_sectors = read_u32(file)?;
+        let chs_cylinders = read_u32_le(file)?;
+        let chs_heads = read_u32_le(file)?;
+        let chs_sectors = read_u32_le(file)?;
         
         let media_type = read_u8(file)?;
     
@@ -340,7 +345,7 @@ fn read_volume_section(file: &mut File, offset: u64) -> Result<VolumeSection, St
         file.seek(SeekFrom::Current(3))
             .map_err(|e| format!("Failed to skip reserved: {e}"))?;
         
-        let error_granularity = read_u32(file)?;
+        let error_granularity = read_u32_le(file)?;
         
         // Skip more reserved
         file.seek(SeekFrom::Current(4))
@@ -517,28 +522,6 @@ fn count_segments(base_path: &str) -> Result<u32, String> {
     Ok(count)
 }
 
-// Helper functions
-fn read_u8(file: &mut File) -> Result<u8, String> {
-    let mut buf = [0u8; 1];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read u8: {e}"))?;
-    Ok(buf[0])
-}
-
-fn read_u32(file: &mut File) -> Result<u32, String> {
-    let mut buf = [0u8; 4];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read u32: {e}"))?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-fn read_u64(file: &mut File) -> Result<u64, String> {
-    let mut buf = [0u8; 8];
-    file.read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read u64: {e}"))?;
-    Ok(u64::from_le_bytes(buf))
-}
-
 // ==============================================================================
 // E01 EXTRACTION IMPLEMENTATION
 // ==============================================================================
@@ -551,16 +534,16 @@ pub struct E01VerifyEntry {
 }
 
 pub fn verify(path: &str, algorithm: &str) -> Result<Vec<E01VerifyEntry>, String> {
-    eprintln!("E01::verify - Starting verification of: {}", path);
-    eprintln!("E01::verify - Algorithm: {}", algorithm);
+    debug!("E01::verify - Starting verification of: {}", path);
+    debug!("E01::verify - Algorithm: {}", algorithm);
     
     let mut session = E01Session::open(path)?;
     let mut results = Vec::new();
 
     let total_chunks = session.table_sections.iter().map(|t| t.chunk_count).sum::<u32>();
-    eprintln!("E01::verify - Total chunks to verify: {}", total_chunks);
-    eprintln!("E01::verify - Number of table sections: {}", session.table_sections.len());
-    eprintln!("E01::verify - Number of segment files: {}", session.files.len());
+    debug!("E01::verify - Total chunks to verify: {}", total_chunks);
+    debug!("E01::verify - Number of table sections: {}", session.table_sections.len());
+    debug!("E01::verify - Number of segment files: {}", session.files.len());
 
     match algorithm.to_lowercase().as_str() {
         "md5" | "sha1" => {
@@ -588,7 +571,7 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<E01VerifyEntry>, String
                     Err(e) => {
                         // Only print first 50 errors and last 50 errors to avoid spam
                         if chunk_index < 50 || chunk_index >= (total_chunks as usize - 50) {
-                            eprintln!("E01 verify: Chunk {} failed: {}", chunk_index, e);
+                            warn!("E01 verify: Chunk {} failed: {}", chunk_index, e);
                         }
                         results.push(E01VerifyEntry {
                             chunk_index,
@@ -602,11 +585,11 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<E01VerifyEntry>, String
             // Print summary statistics
             let success_count = results.iter().filter(|r| r.status == "ok").count();
             let fail_count = results.iter().filter(|r| r.status == "error").count();
-            eprintln!("\n========== VERIFICATION SUMMARY ==========");
-            eprintln!("Total chunks: {}", total_chunks);
-            eprintln!("Successful: {} ({:.2}%)", success_count, (success_count as f64 / total_chunks as f64) * 100.0);
-            eprintln!("Failed: {} ({:.2}%)", fail_count, (fail_count as f64 / total_chunks as f64) * 100.0);
-            eprintln!("==========================================\n");
+            debug!("========== VERIFICATION SUMMARY ==========");
+            debug!("Total chunks: {}", total_chunks);
+            debug!("Successful: {} ({:.2}%)", success_count, (success_count as f64 / total_chunks as f64) * 100.0);
+            debug!("Failed: {} ({:.2}%)", fail_count, (fail_count as f64 / total_chunks as f64) * 100.0);
+            debug!("==========================================\n");
 
             // Compute final hash
             let hash_str = if use_md5 {
@@ -615,7 +598,7 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<E01VerifyEntry>, String
                 format!("{:x}", sha1_hasher.finalize())
             };
 
-            println!("E01 {} hash: {}", algorithm.to_uppercase(), hash_str);
+            info!("E01 {} hash: {}", algorithm.to_uppercase(), hash_str);
         }
         "crc" | "crc32" => {
             // Verify CRC32 for each chunk
@@ -633,7 +616,7 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<E01VerifyEntry>, String
                         });
                     }
                     Err(e) => {
-                        eprintln!("E01 verify: Chunk {} failed: {}", chunk_index, e);
+                        warn!("E01 verify: Chunk {} failed: {}", chunk_index, e);
                         results.push(E01VerifyEntry {
                             chunk_index,
                             status: "error".to_string(),
@@ -705,7 +688,7 @@ pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
                 }
                 Err(e) => {
                     // Write zeros for missing/corrupt chunks
-                    eprintln!("Warning: Failed to read chunk {}: {}", chunk_index, e);
+                    warn!(" Failed to read chunk {}: {}", chunk_index, e);
                     let zeros = vec![0u8; (sectors_per_chunk * bytes_per_sector) as usize];
                     output_file.write_all(&zeros)
                         .map_err(|e| format!("Failed to write zero chunk: {e}"))?;
@@ -719,14 +702,14 @@ pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
 
 impl E01Session {
     fn open(path: &str) -> Result<Self, String> {
-        println!("\n########## SEGMENT-AWARE CODE v2.0 ##########");
-        println!("E01::open - Opening: {}", path);
+        debug!("########## SEGMENT-AWARE CODE v2.0 ##########");
+        debug!("E01::open - Opening: {}", path);
         
         let first_file = open_and_validate(path)?;
 
         // Open all segment files first
         let segment_count = count_segments(path)?;
-        println!("E01::open - Segment count: {}", segment_count);
+        debug!("E01::open - Segment count: {}", segment_count);
         
         let path_obj = Path::new(path);
         let parent = path_obj.parent().ok_or("Invalid path")?;
@@ -750,7 +733,7 @@ impl E01Session {
             segment_sizes.push(size);
         }
 
-        eprintln!("E01::open - Found {} segments with sizes: {:?}", files.len(), segment_sizes);
+        debug!("E01::open - Found {} segments with sizes: {:?}", files.len(), segment_sizes);
         
         // For compatibility with section walking, use first segment size
         let segment_size = segment_sizes[0];
@@ -768,7 +751,7 @@ impl E01Session {
             let offset_in_segment = current_offset % segment_size;
 
             if segment_index >= files.len() {
-                eprintln!("E01::open - Offset {} beyond available segments", current_offset);
+                debug!("E01::open - Offset {} beyond available segments", current_offset);
                 break;
             }
 
@@ -778,7 +761,7 @@ impl E01Session {
                         .trim_matches('\0')
                         .to_string();
 
-                    eprintln!("E01::open - Found section '{}' at offset {} (segment {}, offset {})", 
+                    debug!("E01::open - Found section '{}' at offset {} (segment {}, offset {})", 
                              section_type_str, current_offset, segment_index, offset_in_segment);
 
                     match section_type_str.as_str() {
@@ -796,12 +779,12 @@ impl E01Session {
                             let data_start = current_offset + 24; // Skip section descriptor
                             sectors_offset = Some(data_start); // Update to most recent
                             all_sectors_offsets.push(data_start);
-                            eprintln!("E01::open - Sectors section #{} starts at offset {}", 
+                            debug!("E01::open - Sectors section #{} starts at offset {}", 
                                      all_sectors_offsets.len(), data_start);
                         }
                         "table" => {
                             // Parse ALL table sections - each references the most recent sectors section
-                            eprintln!("E01::open - Table section.size = {}", section.size);
+                            debug!("E01::open - Table section.size = {}", section.size);
                             let data_offset = current_offset + 24;
                             let data_segment_index = (data_offset / segment_size) as usize;
                             let data_offset_in_segment = data_offset % segment_size;
@@ -812,14 +795,14 @@ impl E01Session {
                                 if let Ok(mut table) = read_table_section(&mut files[data_segment_index], data_offset_in_segment, section.size) {
                                     table.sectors_start = sectors_base;
                                     table.segment_index = data_segment_index;
-                                    eprintln!("E01::open - Parsed table {} with {} chunks, base_offset={}, sectors_start={}, segment={}", 
+                                    debug!("E01::open - Parsed table {} with {} chunks, base_offset={}, sectors_start={}, segment={}", 
                                              table_sections.len(), table.chunk_count, table.base_offset, table.sectors_start, data_segment_index);
                                     table_sections.push(table);
                                 }
                             }
                         }
                         "done" => {
-                            eprintln!("E01::open - Reached 'done' section");
+                            debug!("E01::open - Reached 'done' section");
                             break;
                         }
                         _ => {
@@ -829,13 +812,13 @@ impl E01Session {
 
                     // Check for end of chain
                     if section.next_offset == 0 {
-                        eprintln!("E01::open - Section has next_offset=0, stopping");
+                        debug!("E01::open - Section has next_offset=0, stopping");
                         break;
                     }
                     
                     // CRITICAL: Detect circular reference (section pointing to itself)
                     if section.next_offset == current_offset {
-                        eprintln!("E01::open - Circular reference detected: section at {} points to itself, stopping", current_offset);
+                        debug!("E01::open - Circular reference detected: section at {} points to itself, stopping", current_offset);
                         break;
                     }
                     
@@ -843,7 +826,7 @@ impl E01Session {
                     current_offset = section.next_offset;
                 }
                 Err(e) => {
-                    eprintln!("E01::open - Failed to read section at offset {}: {}", current_offset, e);
+                    debug!("E01::open - Failed to read section at offset {}: {}", current_offset, e);
                     break;
                 }
             }
@@ -851,12 +834,12 @@ impl E01Session {
 
         let volume = volume_info.ok_or("No volume section found in E01 file")?;
 
-        eprintln!("E01::open - Parsed {} table sections", table_sections.len());
-        eprintln!("E01::open - Total chunks across all tables: {}", 
+        debug!("E01::open - Parsed {} table sections", table_sections.len());
+        debug!("E01::open - Total chunks across all tables: {}", 
                  table_sections.iter().map(|t| t.chunk_count as usize).sum::<usize>());
         
         for (i, table) in table_sections.iter().enumerate() {
-            eprintln!("E01::open -   Table {}: {} chunks, base_offset={}, first_offset={}, last_offset={}", 
+            debug!("E01::open -   Table {}: {} chunks, base_offset={}, first_offset={}, last_offset={}", 
                      i, table.chunk_count, table.base_offset,
                      table.offsets.first().unwrap_or(&0),
                      table.offsets.last().unwrap_or(&0));
@@ -917,7 +900,7 @@ impl E01Session {
         
         // Debug first few chunks
         if chunk_index < 10 {
-            eprintln!("Chunk {}: offset={:#x}, compressed={}, masked={}, sectors_start={}, global={}, segment={}, offset_in_seg={}", 
+            trace!("Chunk {}: offset={:#x}, compressed={}, masked={}, sectors_start={}, global={}, segment={}, offset_in_seg={}", 
                      chunk_index, chunk_offset, is_compressed, offset_value, table.sectors_start, global_offset, segment_index, offset_in_segment);
         }
         
@@ -1045,42 +1028,42 @@ fn read_table_section(file: &mut File, offset: u64, _size: u64) -> Result<TableS
     let mut debug_bytes = [0u8; 64];
     file.read_exact(&mut debug_bytes)
         .map_err(|e| format!("Failed to read debug bytes: {e}"))?;
-    eprintln!("E01::read_table - First 64 bytes at offset {}: {:02x?}", offset, &debug_bytes);
+    trace!("E01::read_table - First 64 bytes at offset {}: {:02x?}", offset, &debug_bytes);
     
     // Reset to start of table data
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Failed to seek back to table: {e}"))?;
 
-    let chunk_count = read_u32(file)?;
-    eprintln!("E01::read_table - chunk_count: {}", chunk_count);
+    let chunk_count = read_u32_le(file)?;
+    trace!("E01::read_table - chunk_count: {}", chunk_count);
     
     // Skip padding
     file.seek(SeekFrom::Current(12))
         .map_err(|e| format!("Failed to skip padding: {e}"))?;
 
-    let base_offset = read_u64(file)?;
-    eprintln!("E01::read_table - base_offset: {}", base_offset);
+    let base_offset = read_u64_le(file)?;
+    trace!("E01::read_table - base_offset: {}", base_offset);
     
     // Skip more reserved bytes
     file.seek(SeekFrom::Current(4))
         .map_err(|e| format!("Failed to skip reserved: {e}"))?;
 
-    let checksum = read_u32(file)?;
-    eprintln!("E01::read_table - checksum: 0x{:08x}", checksum);
+    let checksum = read_u32_le(file)?;
+    trace!("E01::read_table - checksum: 0x{:08x}", checksum);
 
     // Skip additional 16 bytes of reserved/padding data before offset array
     file.seek(SeekFrom::Current(16))
         .map_err(|e| format!("Failed to skip extra padding: {e}"))?;
     
-    eprintln!("E01::read_table - Reading offset array starting at file position {}", 
+    trace!("E01::read_table - Reading offset array starting at file position {}", 
              file.stream_position().unwrap_or(0));
 
     // E01 tables store 32-bit RELATIVE offsets, not 64-bit absolute offsets!
     let mut offsets = Vec::with_capacity(chunk_count as usize);
     for i in 0..chunk_count {
-        let chunk_offset = read_u32(file)? as u64; // Read as u32, convert to u64
+        let chunk_offset = read_u32_le(file)? as u64; // Read as u32, convert to u64
         if i < 10 {
-            eprintln!("E01::read_table - offset[{}]: {} (relative)", i, chunk_offset);
+            trace!("E01::read_table - offset[{}]: {} (relative)", i, chunk_offset);
         }
         offsets.push(chunk_offset);
     }

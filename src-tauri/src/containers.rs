@@ -1,12 +1,24 @@
 use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 use regex::Regex;
+use tracing::debug;
 
 use crate::ad1;
+use crate::archive;  // Archive formats (7z, ZIP, RAR)
 use crate::ewf;  // Expert Witness Format (E01/EWF/Ex01)
 use crate::l01;
 use crate::raw;  // Raw disk images (.dd, .raw, .img, .001)
+
+/// Pre-compiled regex for matching hex hash values (32-128 chars)
+/// Compiled once on first use via OnceLock
+fn hash_regex() -> &'static Regex {
+    static HASH_REGEX: OnceLock<Regex> = OnceLock::new();
+    HASH_REGEX.get_or_init(|| {
+        Regex::new(r"[a-fA-F0-9]{32,128}").expect("Invalid hash regex")
+    })
+}
 
 #[derive(Serialize, Clone)]
 pub struct StoredHash {
@@ -55,17 +67,21 @@ pub struct ContainerInfo {
     pub e01: Option<ewf::E01Info>,
     pub l01: Option<l01::L01Info>,
     pub raw: Option<raw::RawInfo>,
+    pub archive: Option<archive::ArchiveInfo>,
     pub note: Option<String>,
     pub companion_log: Option<CompanionLogInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct DiscoveredFile {
     pub path: String,
     pub filename: String,
     pub container_type: String,
     pub size: u64,
     pub segment_count: Option<u32>,
+    pub segment_files: Option<Vec<String>>,
+    pub segment_sizes: Option<Vec<u64>>,
+    pub total_segment_size: Option<u64>,
     pub created: Option<String>,
     pub modified: Option<String>,
 }
@@ -83,6 +99,86 @@ enum ContainerKind {
     E01,
     L01,
     Raw,
+    Archive,
+}
+
+/// Fast info - only reads headers, doesn't parse full item trees
+/// Use this for quick container listing/display
+pub fn info_fast(path: &str) -> Result<ContainerInfo, String> {
+    debug!("info_fast: loading {}", path);
+    let kind = detect_container(path).map_err(|e| {
+        debug!("info_fast: detect_container failed for {}: {}", path, e);
+        e
+    })?;
+    let companion_log = find_companion_log(path);
+    
+    match kind {
+        ContainerKind::Ad1 => {
+            let info = ad1::info_fast(path)?;
+            Ok(ContainerInfo {
+                container: "AD1".to_string(),
+                ad1: Some(info),
+                e01: None,
+                l01: None,
+                raw: None,
+                archive: None,
+                note: None,
+                companion_log,
+            })
+        }
+        ContainerKind::E01 => {
+            let info = ewf::info(path)?;
+            Ok(ContainerInfo {
+                container: "E01".to_string(),
+                ad1: None,
+                e01: Some(info),
+                l01: None,
+                raw: None,
+                archive: None,
+                note: None,
+                companion_log,
+            })
+        }
+        ContainerKind::L01 => {
+            let info = l01::info(path)?;
+            Ok(ContainerInfo {
+                container: "L01".to_string(),
+                ad1: None,
+                e01: None,
+                l01: Some(info),
+                raw: None,
+                archive: None,
+                note: None,
+                companion_log,
+            })
+        }
+        ContainerKind::Raw => {
+            let info = raw::info(path)?;
+            Ok(ContainerInfo {
+                container: "RAW".to_string(),
+                ad1: None,
+                e01: None,
+                l01: None,
+                raw: Some(info),
+                archive: None,
+                note: None,
+                companion_log,
+            })
+        }
+        ContainerKind::Archive => {
+            let info = archive::info(path)?;
+            Ok(ContainerInfo {
+                container: format!("Archive ({})", info.format),
+                ad1: None,
+                e01: None,
+                l01: None,
+                raw: None,
+                archive: Some(info),
+                note: None,
+                companion_log,
+            })
+        }
+    }
 }
 
 pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
@@ -99,6 +195,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 e01: None,
                 l01: None,
                 raw: None,
+                archive: None,
                 note: None,
                 companion_log,
             })
@@ -111,6 +208,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 e01: Some(info),
                 l01: None,
                 raw: None,
+                archive: None,
                 note: None,
                 companion_log,
             })
@@ -123,6 +221,7 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 e01: None,
                 l01: Some(info),
                 raw: None,
+                archive: None,
                 note: None,
                 companion_log,
             })
@@ -135,6 +234,20 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
                 e01: None,
                 l01: None,
                 raw: Some(info),
+                archive: None,
+                note: None,
+                companion_log,
+            })
+        }
+        ContainerKind::Archive => {
+            let info = archive::info(path)?;
+            Ok(ContainerInfo {
+                container: format!("Archive ({})", info.format),
+                ad1: None,
+                e01: None,
+                l01: None,
+                raw: None,
+                archive: Some(info),
                 note: None,
                 companion_log,
             })
@@ -172,6 +285,7 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
                 message: Some(format!("{}: {}", algorithm.to_uppercase(), computed_hash)),
             }])
         }
+        ContainerKind::Archive => Err("Archive verification is not implemented yet. Use standard archive tools.".to_string()),
     }
 }
 
@@ -181,6 +295,7 @@ pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
         ContainerKind::E01 => ewf::extract(path, output_dir),
         ContainerKind::L01 => Err("L01 extraction is not implemented yet.".to_string()),
         ContainerKind::Raw => raw::extract(path, output_dir),
+        ContainerKind::Archive => Err("Archive extraction is not implemented yet. Use standard archive tools (7z, unzip).".to_string()),
     }
 }
 
@@ -194,11 +309,15 @@ fn detect_container(path: &str) -> Result<ContainerKind, String> {
     
     // Check E01/EWF first (before L01 to avoid .lx01 confusion)
     // Support .e01, .ex01, .e02, .e03, etc., and .ewf extensions
-    if (lower.ends_with(".e01") || lower.ends_with(".ex01") || lower.ends_with(".ewf") 
-        || lower.contains(".e0") || lower.contains(".ex"))
-        && ewf::is_e01(path).unwrap_or(false) 
+    if lower.ends_with(".e01") || lower.ends_with(".ex01") || lower.ends_with(".ewf") 
+        || lower.contains(".e0") || lower.contains(".ex")
     {
-        return Ok(ContainerKind::E01);
+        debug!("Checking E01 signature for: {}", path);
+        if ewf::is_e01(path).unwrap_or(false) {
+            return Ok(ContainerKind::E01);
+        } else {
+            debug!("E01 signature check failed for: {}", path);
+        }
     }
     
     // Check L01
@@ -213,12 +332,17 @@ fn detect_container(path: &str) -> Result<ContainerKind, String> {
         return Ok(ContainerKind::Ad1);
     }
 
+    // Check archive formats (7z, ZIP, RAR, etc.) - before raw to catch .7z.001 properly
+    if archive::is_archive(path).unwrap_or(false) {
+        return Ok(ContainerKind::Archive);
+    }
+
     // Check raw disk images (.dd, .raw, .img, .001, .002, etc.)
     if raw::is_raw(path).unwrap_or(false) {
         return Ok(ContainerKind::Raw);
     }
 
-    Err(format!("Unsupported or unrecognized logical container: {}\nSupported formats: AD1, E01/EWF, L01, RAW (.dd, .raw, .img, .001)", path))
+    Err(format!("Unsupported or unrecognized logical container: {}\nSupported formats: AD1, E01/EWF, L01, RAW (.dd, .raw, .img, .001), Archives (7z, ZIP, RAR)", path))
 }
 
 pub fn scan_directory(dir_path: &str) -> Result<Vec<DiscoveredFile>, String> {
@@ -271,13 +395,19 @@ where
 
         let entry_path = entry.path();
         
+        // Use file_type() from DirEntry - more reliable than path.is_dir()
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        
         // Recurse into subdirectories if enabled
-        if recursive && entry_path.is_dir() {
+        if recursive && file_type.is_dir() {
             let _ = scan_dir_streaming_internal(&entry_path, seen_basenames, recursive, on_file_found, count);
             continue;
         }
         
-        if !entry_path.is_file() {
+        if !file_type.is_file() {
             continue;
         }
 
@@ -291,14 +421,22 @@ where
             .to_string_lossy()
             .to_string();
 
+        // Skip macOS resource fork files (._filename)
+        if filename.starts_with("._") {
+            continue;
+        }
+
         let lower = filename.to_lowercase();
         
-        // Check for forensic container files (same logic as scan_dir_internal)
-        let container_type = if lower.ends_with(".ad1") || lower.ends_with(".ad2") || lower.ends_with(".ad3") {
-            match crate::ad1::is_ad1(path_str) {
-                Ok(true) => Some("AD1"),
-                _ => None,
-            }
+        // Skip non-first segments entirely - we only want to show one entry per container
+        if !is_first_segment(&lower) {
+            continue;
+        }
+        
+        // Check for forensic container files by extension only (fast, no file I/O)
+        // Validation of actual file format happens later in logical_info
+        let container_type = if lower.ends_with(".ad1") {
+            Some("AD1")
         } else if lower.ends_with(".l01") {
             Some("L01")
         } else if lower.ends_with(".lx01") {
@@ -311,19 +449,24 @@ where
             }
         } else if lower.ends_with(".e01") {
             Some("EnCase (E01)")
-        } else if is_numbered_segment(&lower) {
-            let first_seg_path = get_first_segment_path(path_str);
-            if crate::ewf::is_e01(&first_seg_path).unwrap_or(false) {
-                Some("EnCase (E01)")
-            } else if crate::raw::is_raw(&first_seg_path).unwrap_or(false) {
-                Some("Raw Image")
-            } else {
-                Some("Raw Image")
-            }
         } else if lower.ends_with(".ex01") {
             Some("EnCase (Ex01)")
         } else if lower.ends_with(".aff") || lower.ends_with(".afd") {
             Some("AFF")
+        // Archive formats - check before raw to catch .7z.001 properly
+        } else if lower.ends_with(".7z") || lower.ends_with(".7z.001") {
+            Some("7-Zip")
+        } else if lower.ends_with(".zip") || lower.ends_with(".zip.001") || lower.ends_with(".z01") {
+            Some("ZIP")
+        } else if lower.ends_with(".rar") || lower.ends_with(".r00") {
+            Some("RAR")
+        } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+            Some("TAR.GZ")
+        } else if lower.ends_with(".gz") && !lower.ends_with(".tar.gz") {
+            Some("GZIP")
+        } else if is_numbered_segment(&lower) && !is_archive_segment(&lower) {
+            // Raw image segments (.001, .002, etc.) - but not archive segments
+            Some("Raw Image")
         } else if lower.ends_with(".dd") || lower.ends_with(".raw") || lower.ends_with(".img") {
             Some("Raw Image")
         } else {
@@ -334,9 +477,9 @@ where
             // For multi-segment files (like .E01, .001), only show the first segment
             let basename = get_segment_basename(&filename);
             if seen_basenames.insert(basename.clone()) {
-                // For numbered segments, always use the first segment path (.001)
+                // For numbered segments, construct .001 path without checking existence (fast)
                 let display_path = if is_numbered_segment(&lower) {
-                    get_first_segment_path(path_str)
+                    get_first_segment_path_fast(path_str)
                 } else {
                     path_str.to_string()
                 };
@@ -346,40 +489,26 @@ where
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or(filename.clone());
                 
+                // Use DirEntry metadata (cached from readdir syscall) - fast
                 let metadata = entry.metadata().ok();
                 let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 
-                let created = metadata.as_ref().and_then(|m| {
-                    m.created().ok()
-                        .map(|t| {
-                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
-                            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-                        })
-                });
+                // FAST PATH: Skip segment calculation during scan - it's slow on external drives
+                // Segment details will be calculated on-demand when user selects a file
+                // Just use the first file's size for now
                 
-                let modified = metadata.as_ref().and_then(|m| {
-                    m.modified().ok()
-                        .map(|t| {
-                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
-                            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-                        })
-                });
-
-                let parent_dir = entry_path.parent().unwrap_or(path);
-                let (total_size, segment_count): (u64, Option<u32>) = if is_segmented_file(&lower) {
-                    calculate_total_segment_info(parent_dir, &basename).unwrap_or((file_size, None))
-                } else {
-                    (file_size, None)
-                };
-
+                // Skip timestamps during scan - they're slow and rarely needed
                 let file = DiscoveredFile {
                     path: display_path,
                     filename: display_filename,
                     container_type: ctype.to_string(),
-                    size: total_size,
-                    segment_count,
-                    created,
-                    modified,
+                    size: file_size, // Just first segment size - full size calculated on-demand
+                    segment_count: None,
+                    segment_files: None,
+                    segment_sizes: None,
+                    total_segment_size: None,
+                    created: None,
+                    modified: None,
                 };
                 
                 on_file_found(&file);
@@ -425,13 +554,19 @@ fn scan_dir_internal(
 
         let entry_path = entry.path();
         
+        // Use file_type() from DirEntry - more reliable than path.is_dir()
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        
         // Recurse into subdirectories if enabled
-        if recursive && entry_path.is_dir() {
+        if recursive && file_type.is_dir() {
             let _ = scan_dir_internal(&entry_path, discovered, seen_basenames, recursive);
             continue;
         }
         
-        if !entry_path.is_file() {
+        if !file_type.is_file() {
             continue;
         }
 
@@ -445,10 +580,20 @@ fn scan_dir_internal(
             .to_string_lossy()
             .to_string();
 
+        // Skip macOS resource fork files (._filename)
+        if filename.starts_with("._") {
+            continue;
+        }
+
         let lower = filename.to_lowercase();
         
+        // Skip non-first segments entirely - we only want to show one entry per container
+        if !is_first_segment(&lower) {
+            continue;
+        }
+        
         // Check for forensic container files
-        let container_type = if lower.ends_with(".ad1") || lower.ends_with(".ad2") || lower.ends_with(".ad3") {
+        let container_type = if lower.ends_with(".ad1") {
             // Verify it's actually an AD1 file
             match ad1::is_ad1(path_str) {
                 Ok(true) => Some("AD1"),
@@ -527,20 +672,18 @@ fn scan_dir_internal(
                         })
                 });
 
-                // For segmented files, try to calculate total size and count
-                let parent_dir = entry_path.parent().unwrap_or(path);
-                let (total_size, segment_count): (u64, Option<u32>) = if is_segmented_file(&lower) {
-                    calculate_total_segment_info(parent_dir, &basename).unwrap_or((file_size, None))
-                } else {
-                    (file_size, None)
-                };
+                // FAST PATH: Skip segment calculation during scan - it's slow on external drives
+                // Segment details will be calculated on-demand when user selects a file
 
                 discovered.push(DiscoveredFile {
                     path: display_path,
                     filename: display_filename,
                     container_type: ctype.to_string(),
-                    size: total_size,
-                    segment_count,
+                    size: file_size, // Just first segment size - full size calculated on-demand
+                    segment_count: None,
+                    segment_files: None,
+                    segment_sizes: None,
+                    total_segment_size: None,
                     created,
                     modified,
                 });
@@ -594,9 +737,142 @@ fn get_first_segment_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Fast version - just constructs .001 path without checking existence
+/// Used during directory scan to avoid slow file I/O
+fn get_first_segment_path_fast(path: &str) -> String {
+    let path_obj = Path::new(path);
+    if let Some(parent) = path_obj.parent() {
+        if let Some(filename) = path_obj.file_name() {
+            let filename_str = filename.to_string_lossy();
+            if let Some(dot_pos) = filename_str.rfind('.') {
+                let base = &filename_str[..dot_pos];
+                let first_seg = format!("{}.001", base);
+                return parent.join(&first_seg).to_string_lossy().to_string();
+            }
+        }
+    }
+    path.to_string()
+}
+
 /// Check if file is part of a segmented series
+#[allow(dead_code)]
 fn is_segmented_file(lower: &str) -> bool {
-    lower.ends_with(".e01") || lower.ends_with(".e02") || lower.ends_with(".ex01") || is_numbered_segment(lower)
+    lower.ends_with(".e01") || lower.ends_with(".e02") || lower.ends_with(".ex01") || 
+    is_numbered_segment(lower) || is_ad1_segment(lower)
+}
+
+/// Check if filename is an AD1 segment (.ad1, .ad2, .ad3, etc.)
+fn is_ad1_segment(lower: &str) -> bool {
+    if lower.len() < 4 { return false; }
+    if let Some(dot_pos) = lower.rfind('.') {
+        let ext = &lower[dot_pos + 1..];
+        if ext.starts_with("ad") && ext.len() >= 3 {
+            let num_part = &ext[2..];
+            return num_part.chars().all(|c| c.is_ascii_digit()) && !num_part.is_empty();
+        }
+    }
+    false
+}
+
+/// Check if this is the first segment of a multi-segment file
+fn is_first_segment(lower: &str) -> bool {
+    // AD1 files: .ad1 is first
+    if lower.ends_with(".ad1") { return true; }
+    // AD1 segments but not first: .ad2, .ad3, etc.
+    if is_ad1_segment(lower) && !lower.ends_with(".ad1") { return false; }
+    
+    // E01 files: .E01 is first
+    if lower.ends_with(".e01") { return true; }
+    // E01 segments but not first
+    if lower.ends_with(".e02") { return false; }
+    for i in 3..=99 {
+        if lower.ends_with(&format!(".e{:02}", i)) { return false; }
+    }
+    
+    // Archive formats - first segments
+    // 7z: .7z or .7z.001 is first
+    if lower.ends_with(".7z") { return true; }
+    if lower.ends_with(".7z.001") { return true; }
+    // .7z.002, .7z.003, etc. are not first
+    if is_7z_continuation(lower) { return false; }
+    
+    // ZIP: .zip or .zip.001 or .z01 is first
+    if lower.ends_with(".zip") { return true; }
+    if lower.ends_with(".zip.001") { return true; }
+    if lower.ends_with(".z01") { return true; }
+    // .zip.002, .z02, etc. are not first
+    if is_zip_continuation(lower) { return false; }
+    
+    // RAR: .rar or .r00 is first
+    if lower.ends_with(".rar") { return true; }
+    if lower.ends_with(".r00") { return true; }
+    // .r01, .r02, etc. are not first
+    if is_rar_continuation(lower) { return false; }
+    
+    // TAR archives
+    if lower.ends_with(".tar") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz") { return true; }
+    
+    // GZIP
+    if lower.ends_with(".gz") { return true; }
+    
+    // Numbered segments: .001 is first (for non-archive files)
+    if let Some(dot_pos) = lower.rfind('.') {
+        let ext = &lower[dot_pos + 1..];
+        if ext.len() == 3 && ext.chars().all(|c| c.is_ascii_digit()) {
+            return ext == "001";
+        }
+    }
+    
+    // Not a segment file, treat as first
+    true
+}
+
+/// Check if this is a 7z continuation segment (.7z.002, .7z.003, etc.)
+fn is_7z_continuation(lower: &str) -> bool {
+    if let Some(pos) = lower.rfind(".7z.") {
+        let suffix = &lower[pos + 4..];
+        if suffix.chars().all(|c| c.is_ascii_digit()) && suffix != "001" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if this is a ZIP continuation segment (.zip.002, .z02, etc.)
+fn is_zip_continuation(lower: &str) -> bool {
+    // .zip.002, .zip.003, etc.
+    if let Some(pos) = lower.rfind(".zip.") {
+        let suffix = &lower[pos + 5..];
+        if suffix.chars().all(|c| c.is_ascii_digit()) && suffix != "001" {
+            return true;
+        }
+    }
+    // .z02, .z03, etc.
+    if lower.len() >= 4 {
+        let ext = &lower[lower.len() - 4..];
+        if ext.starts_with(".z") && ext[2..].chars().all(|c| c.is_ascii_digit()) && ext != ".z01" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if this is a RAR continuation segment (.r01, .r02, etc.)
+fn is_rar_continuation(lower: &str) -> bool {
+    if lower.len() >= 4 {
+        let ext = &lower[lower.len() - 4..];
+        if ext.starts_with(".r") && ext[2..].chars().all(|c| c.is_ascii_digit()) && ext != ".r00" {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if this is an archive segment (any type)
+fn is_archive_segment(lower: &str) -> bool {
+    is_7z_continuation(lower) || is_zip_continuation(lower) || is_rar_continuation(lower)
+        || lower.ends_with(".7z.001")
+        || lower.ends_with(".zip.001")
 }
 
 /// Get the base name without segment number for grouping
@@ -606,6 +882,39 @@ fn get_segment_basename(filename: &str) -> String {
     // Handle .E01, .E02, etc.
     if lower.ends_with(".e01") {
         return filename[..filename.len() - 4].to_string();
+    }
+    
+    // Handle .ad1, .ad2, .ad3, etc.
+    if is_ad1_segment(&lower) {
+        if let Some(dot_pos) = filename.rfind('.') {
+            return filename[..dot_pos].to_string();
+        }
+    }
+    
+    // Handle .7z.001, .7z.002, etc.
+    if let Some(pos) = lower.rfind(".7z.") {
+        return filename[..pos + 3].to_string(); // Keep .7z
+    }
+    
+    // Handle .zip.001, .zip.002, etc.
+    if let Some(pos) = lower.rfind(".zip.") {
+        return filename[..pos + 4].to_string(); // Keep .zip
+    }
+    
+    // Handle .z01, .z02, etc. (ZIP split)
+    if lower.len() >= 4 {
+        let ext = &lower[lower.len() - 4..];
+        if ext.starts_with(".z") && ext[2..].chars().all(|c| c.is_ascii_digit()) {
+            return filename[..filename.len() - 4].to_string();
+        }
+    }
+    
+    // Handle .r00, .r01, etc. (RAR segments)
+    if lower.len() >= 4 {
+        let ext = &lower[lower.len() - 4..];
+        if ext.starts_with(".r") && ext[2..].chars().all(|c| c.is_ascii_digit()) {
+            return filename[..filename.len() - 4].to_string();
+        }
     }
     
     // Handle .001, .002, etc.
@@ -619,45 +928,83 @@ fn get_segment_basename(filename: &str) -> String {
     filename.to_string()
 }
 
+/// Detailed segment information
+#[allow(dead_code)]
+struct SegmentInfo {
+    total_size: u64,
+    count: u32,
+    files: Vec<String>,
+    sizes: Vec<u64>,
+}
+
 /// Calculate total size of all segments in a series
-fn calculate_total_segment_info(dir: &Path, basename: &str) -> Option<(u64, Option<u32>)> {
+#[allow(dead_code)]
+fn calculate_total_segment_info(dir: &Path, basename: &str) -> Option<SegmentInfo> {
     let mut total = 0u64;
     let mut count = 0u32;
+    let mut files = Vec::new();
+    let mut sizes = Vec::new();
     
-    // Try common segment patterns
-    let patterns = [
-        format!("{}.E01", basename),
-        format!("{}.001", basename),
-    ];
-    
-    for pattern in &patterns {
-        let mut segment_num = 1;
-        // Limit to 100 segments max to prevent infinite loops
-        while segment_num <= 100 {
-            let segment_name = if pattern.contains(".E01") {
-                if segment_num == 1 {
-                    format!("{}.E01", basename)
-                } else {
-                    format!("{}.E{:02}", basename, segment_num)
-                }
-            } else {
-                format!("{}.{:03}", basename, segment_num)
-            };
-            
-            let segment_path = dir.join(&segment_name);
-            if let Ok(metadata) = segment_path.metadata() {
-                total += metadata.len();
-                count += 1;
-                segment_num += 1;
-            } else {
-                // Stop at first missing segment
-                break;
-            }
+    // Try AD1 segments first (.ad1, .ad2, .ad3, ...)
+    for i in 1..=100 {
+        let segment_name = format!("{}.ad{}", basename, i);
+        let segment_path = dir.join(&segment_name);
+        if let Ok(metadata) = segment_path.metadata() {
+            let size = metadata.len();
+            total += size;
+            count += 1;
+            files.push(segment_name);
+            sizes.push(size);
+        } else {
+            break;
         }
+    }
+    
+    if total > 0 {
+        return Some(SegmentInfo { total_size: total, count, files, sizes });
+    }
+    
+    // Try E01 segments (.E01, .E02, ...)
+    for segment_num in 1..=100 {
+        let segment_name = if segment_num == 1 {
+            format!("{}.E01", basename)
+        } else {
+            format!("{}.E{:02}", basename, segment_num)
+        };
         
-        if total > 0 {
-            return Some((total, if count > 1 { Some(count) } else { None }));
+        let segment_path = dir.join(&segment_name);
+        if let Ok(metadata) = segment_path.metadata() {
+            let size = metadata.len();
+            total += size;
+            count += 1;
+            files.push(segment_name);
+            sizes.push(size);
+        } else {
+            break;
         }
+    }
+    
+    if total > 0 {
+        return Some(SegmentInfo { total_size: total, count, files, sizes });
+    }
+    
+    // Try numbered segments (.001, .002, ...)
+    for segment_num in 1..=999 {
+        let segment_name = format!("{}.{:03}", basename, segment_num);
+        let segment_path = dir.join(&segment_name);
+        if let Ok(metadata) = segment_path.metadata() {
+            let size = metadata.len();
+            total += size;
+            count += 1;
+            files.push(segment_name);
+            sizes.push(size);
+        } else {
+            break;
+        }
+    }
+    
+    if total > 0 {
+        return Some(SegmentInfo { total_size: total, count, files, sizes });
     }
     
     None
@@ -665,6 +1012,7 @@ fn calculate_total_segment_info(dir: &Path, basename: &str) -> Option<(u64, Opti
 
 /// Find and parse companion log file (e.g., .txt file created by FTK Imager, dc3dd, etc.)
 fn find_companion_log(image_path: &str) -> Option<CompanionLogInfo> {
+    debug!("Looking for companion log for: {}", image_path);
     let path = Path::new(image_path);
     let parent = path.parent()?;
     let stem = path.file_stem()?.to_str()?;
@@ -706,6 +1054,15 @@ fn find_companion_log(image_path: &str) -> Option<CompanionLogInfo> {
         parent.join(format!("{}.log", stem)),               // image.log
         parent.join(format!("{}.LOG", stem)),               // image.LOG (uppercase for Forensic MD5)
         
+        // AD1 / FTK Imager specific patterns
+        parent.join(format!("{}.ad1.txt", stem)),           // image.ad1.txt (FTK Imager)
+        parent.join(format!("{}1.txt", stem)),              // image1.txt (if stem ends in number)
+        parent.join(format!("{}_img1.ad1.txt", stem.trim_end_matches("_img1"))), // For _img1 suffix
+        
+        // E01 / EnCase specific patterns  
+        parent.join(format!("{}.E01.txt", stem)),           // image.E01.txt
+        parent.join(format!("{}.e01.txt", stem)),           // image.e01.txt
+        
         // For segmented raw images
         parent.join(format!("{}.txt", base_for_log)),       // image.dd.txt for image.dd.001
         parent.join(format!("{}.log", base_for_log)),       // image.dd.log for image.dd.001
@@ -739,12 +1096,15 @@ fn find_companion_log(image_path: &str) -> Option<CompanionLogInfo> {
     
     for log_path in candidate_paths {
         if log_path.exists() {
+            debug!("Found companion log candidate: {:?}", log_path);
             if let Ok(info) = parse_companion_log(&log_path) {
+                debug!("Successfully parsed companion log: {:?}", log_path);
                 return Some(info);
             }
         }
     }
     
+    debug!("No companion log found for: {}", image_path);
     None
 }
 
@@ -1024,8 +1384,7 @@ fn parse_dc3dd_hash_line(line: &str) -> Option<StoredHash> {
     
     for (pattern, algo_name) in &algorithms {
         if line_lower.contains(pattern) {
-            let re = Regex::new(r"[a-fA-F0-9]{32,128}").ok()?;
-            if let Some(m) = re.find(line) {
+            if let Some(m) = hash_regex().find(line) {
                 return Some(StoredHash {
                     algorithm: algo_name.to_string(),
                     hash: m.as_str().to_lowercase(),
@@ -1062,9 +1421,8 @@ fn parse_hash_line(line: &str, check_verified: bool) -> Option<StoredHash> {
     
     for alg in &algorithms {
         if line_lower.contains(alg) {
-            // Try to extract the hash value
-            let re = Regex::new(r"[a-fA-F0-9]{32,128}").ok()?;
-            if let Some(m) = re.find(line) {
+            // Try to extract the hash value using pre-compiled regex
+            if let Some(m) = hash_regex().find(line) {
                 let hash = m.as_str().to_lowercase();
                 
                 // Check for verification status

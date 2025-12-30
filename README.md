@@ -1,6 +1,6 @@
-# liblfx
+# FFX - Forensic File Xplorer
 
-A standalone Tauri + SolidJS desktop app for inspecting AccessData AD1 logical images.
+A standalone Tauri + SolidJS desktop app for inspecting forensic container files.
 
 ## Features
 

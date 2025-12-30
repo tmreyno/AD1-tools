@@ -1,14 +1,19 @@
 {
-  "name": "liblfx",
+  "name": "ffx-check",
   "version": "0.1.0",
-  "description": "Logical evidence explorer built with Tauri + SolidJS",
+  "description": "FFX - Forensic File Xplorer built with Tauri + SolidJS",
   "type": "module",
   "scripts": {
     "start": "vite",
     "dev": "vite",
     "build": "vite build",
     "serve": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "clean": "rm -rf dist node_modules/.vite src-tauri/target",
+    "clean:app": "rm -rf ~/Library/Application\\ Support/com.ffxcheck.app ~/Library/Caches/com.ffxcheck.app",
+    "clean:all": "npm run clean && npm run clean:app",
+    "tauri:clean": "npm run clean && tauri dev",
+    "tauri:fresh": "npm run clean:all && tauri dev"
   },
   "license": "MIT",
   "dependencies": {

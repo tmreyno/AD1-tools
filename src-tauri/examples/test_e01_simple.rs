@@ -1,5 +1,5 @@
 // Simple E01 test example
-use liblfx_lib::ewf;
+use ffx_check_lib::ewf;
 
 fn main() {
     let path = "/Users/terryreynolds/Downloads/4Dell Latitude CPi.E01";

@@ -1,15 +1,19 @@
 // Shared hash utilities for forensic container verification
 //
 // Provides unified hashing across all container formats (AD1, E01, RAW, L01)
-// with support for MD5, SHA-1, SHA-256, SHA-512, BLAKE2b, BLAKE3
+// with support for MD5, SHA-1, SHA-256, SHA-512, BLAKE2b, BLAKE3, XXH3, XXH64, CRC32
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use md5::Md5;
 use sha1::{Sha1, Digest};
 use sha2::{Sha256, Sha512};
 use blake2::Blake2b512;
 use blake3::Hasher as Blake3Hasher;
+use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh64::Xxh64;
+use crc32fast::Hasher as Crc32Hasher;
 
 use super::BUFFER_SIZE;
 
@@ -22,6 +26,8 @@ use super::BUFFER_SIZE;
 /// - SHA256/SHA512: NIST approved, court-accepted forensic standards
 /// - BLAKE3: Modern, extremely fast cryptographic hash
 /// - BLAKE2b: Fast cryptographic hash (used in many security applications)
+/// - XXH3/XXH64: Ultra-fast non-cryptographic hashes for integrity checks
+/// - CRC32: Fast checksum (non-cryptographic)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashAlgorithm {
     Md5,
@@ -30,6 +36,9 @@ pub enum HashAlgorithm {
     Sha512,
     Blake3,
     Blake2,
+    Xxh3,
+    Xxh64,
+    Crc32,
 }
 
 impl HashAlgorithm {
@@ -42,8 +51,11 @@ impl HashAlgorithm {
             "sha512" | "sha-512" => Ok(HashAlgorithm::Sha512),
             "blake3" => Ok(HashAlgorithm::Blake3),
             "blake2" | "blake2b" => Ok(HashAlgorithm::Blake2),
+            "xxh3" | "xxhash3" => Ok(HashAlgorithm::Xxh3),
+            "xxh64" | "xxhash64" => Ok(HashAlgorithm::Xxh64),
+            "crc32" | "crc-32" => Ok(HashAlgorithm::Crc32),
             _ => Err(format!(
-                "Unsupported hash algorithm: '{}'. Supported: md5, sha1, sha256, sha512, blake3, blake2",
+                "Unsupported hash algorithm: '{}'. Supported: md5, sha1, sha256, sha512, blake3, blake2, xxh3, xxh64, crc32",
                 algorithm
             )),
         }
@@ -58,6 +70,9 @@ impl HashAlgorithm {
             HashAlgorithm::Sha512 => "SHA-512",
             HashAlgorithm::Blake3 => "BLAKE3",
             HashAlgorithm::Blake2 => "BLAKE2b",
+            HashAlgorithm::Xxh3 => "XXH3",
+            HashAlgorithm::Xxh64 => "XXH64",
+            HashAlgorithm::Crc32 => "CRC32",
         }
     }
 
@@ -70,6 +85,9 @@ impl HashAlgorithm {
             HashAlgorithm::Sha512 => 128,
             HashAlgorithm::Blake3 => 64,
             HashAlgorithm::Blake2 => 128,
+            HashAlgorithm::Xxh3 => 32,  // 128-bit = 32 hex chars
+            HashAlgorithm::Xxh64 => 16, // 64-bit = 16 hex chars
+            HashAlgorithm::Crc32 => 8,  // 32-bit = 8 hex chars
         }
     }
 }
@@ -85,25 +103,32 @@ pub fn parse_algorithm(algorithm: &str) -> Result<HashAlgorithm, String> {
 
 /// A unified streaming hasher that supports all hash algorithms
 /// Used for incremental hashing of large files or chunks
+/// Note: Blake3Hasher is boxed because it's ~1920 bytes, while other variants are ~20-600 bytes
 pub enum StreamingHasher {
-    Md5(md5::Context),
+    Md5(Md5),
     Sha1(Sha1),
     Sha256(Sha256),
     Sha512(Sha512),
-    Blake3(Blake3Hasher),
+    Blake3(Box<Blake3Hasher>),  // Boxed to reduce enum size (~1920 bytes -> 8 byte pointer)
     Blake2(Blake2b512),
+    Xxh3(Xxh3),
+    Xxh64(Xxh64),
+    Crc32(Crc32Hasher),
 }
 
 impl StreamingHasher {
     /// Create a new streaming hasher for the specified algorithm
     pub fn new(algorithm: HashAlgorithm) -> Self {
         match algorithm {
-            HashAlgorithm::Md5 => StreamingHasher::Md5(md5::Context::new()),
+            HashAlgorithm::Md5 => StreamingHasher::Md5(Md5::new()),
             HashAlgorithm::Sha1 => StreamingHasher::Sha1(Sha1::new()),
             HashAlgorithm::Sha256 => StreamingHasher::Sha256(Sha256::new()),
             HashAlgorithm::Sha512 => StreamingHasher::Sha512(Sha512::new()),
-            HashAlgorithm::Blake3 => StreamingHasher::Blake3(Blake3Hasher::new()),
+            HashAlgorithm::Blake3 => StreamingHasher::Blake3(Box::new(Blake3Hasher::new())),
             HashAlgorithm::Blake2 => StreamingHasher::Blake2(Blake2b512::new()),
+            HashAlgorithm::Xxh3 => StreamingHasher::Xxh3(Xxh3::new()),
+            HashAlgorithm::Xxh64 => StreamingHasher::Xxh64(Xxh64::new(0)),
+            HashAlgorithm::Crc32 => StreamingHasher::Crc32(Crc32Hasher::new()),
         }
     }
 
@@ -115,12 +140,15 @@ impl StreamingHasher {
     /// Update the hash with more data
     pub fn update(&mut self, data: &[u8]) {
         match self {
-            StreamingHasher::Md5(h) => h.consume(data),
-            StreamingHasher::Sha1(h) => h.update(data),
-            StreamingHasher::Sha256(h) => h.update(data),
-            StreamingHasher::Sha512(h) => h.update(data),
+            StreamingHasher::Md5(h) => Digest::update(h, data),
+            StreamingHasher::Sha1(h) => Digest::update(h, data),
+            StreamingHasher::Sha256(h) => Digest::update(h, data),
+            StreamingHasher::Sha512(h) => Digest::update(h, data),
             StreamingHasher::Blake3(h) => { h.update(data); }
-            StreamingHasher::Blake2(h) => h.update(data),
+            StreamingHasher::Blake2(h) => Digest::update(h, data),
+            StreamingHasher::Xxh3(h) => h.update(data),
+            StreamingHasher::Xxh64(h) => h.update(data),
+            StreamingHasher::Crc32(h) => h.update(data),
         }
     }
 
@@ -136,12 +164,15 @@ impl StreamingHasher {
     /// Finalize and return the hash as a hex string
     pub fn finalize(self) -> String {
         match self {
-            StreamingHasher::Md5(h) => format!("{:x}", h.compute()),
+            StreamingHasher::Md5(h) => hex::encode(h.finalize()),
             StreamingHasher::Sha1(h) => hex::encode(h.finalize()),
             StreamingHasher::Sha256(h) => hex::encode(h.finalize()),
             StreamingHasher::Sha512(h) => hex::encode(h.finalize()),
             StreamingHasher::Blake3(h) => h.finalize().to_hex().to_string(),
             StreamingHasher::Blake2(h) => hex::encode(h.finalize()),
+            StreamingHasher::Xxh3(h) => format!("{:032x}", h.digest128()),
+            StreamingHasher::Xxh64(h) => format!("{:016x}", h.digest()),
+            StreamingHasher::Crc32(h) => format!("{:08x}", h.finalize()),
         }
     }
 }
@@ -153,7 +184,11 @@ impl StreamingHasher {
 /// Compute hash of data using specified algorithm (one-shot, for small data)
 pub fn compute_hash(data: &[u8], algorithm: HashAlgorithm) -> String {
     match algorithm {
-        HashAlgorithm::Md5 => format!("{:x}", md5::compute(data)),
+        HashAlgorithm::Md5 => {
+            let mut hasher = Md5::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize())
+        }
         HashAlgorithm::Sha1 => {
             let mut hasher = Sha1::new();
             hasher.update(data);
@@ -178,6 +213,20 @@ pub fn compute_hash(data: &[u8], algorithm: HashAlgorithm) -> String {
             let mut hasher = Blake2b512::new();
             hasher.update(data);
             hex::encode(hasher.finalize())
+        }
+        HashAlgorithm::Xxh3 => {
+            let mut hasher = Xxh3::new();
+            hasher.update(data);
+            format!("{:032x}", hasher.digest128())
+        }
+        HashAlgorithm::Xxh64 => {
+            let hash = xxhash_rust::xxh64::xxh64(data, 0);
+            format!("{:016x}", hash)
+        }
+        HashAlgorithm::Crc32 => {
+            let mut hasher = Crc32Hasher::new();
+            hasher.update(data);
+            format!("{:08x}", hasher.finalize())
         }
     }
 }

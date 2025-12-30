@@ -1,0 +1,553 @@
+# 📦 Archive Parsing Reference Pack
+
+This document contains **three build-ready Markdown files** separated by clear boundaries so they can be split directly into:
+
+* `ZIP.md`
+* `7Z.md`
+* `structs.md`
+
+Each section includes **ZIP64, AES, encrypted header handling**, and **working Rust parsers (raw I/O, no deps)**.
+
+---
+
+# ==========================
+
+# FILE: ZIP.md
+
+# ==========================
+
+# ZIP File Format — Forensic & Parsing Reference
+
+## ZIP Signatures
+
+```
+50 4B 03 04  Local File Header
+50 4B 01 02  Central Directory Header
+50 4B 05 06  End of Central Directory (EOCD)
+```
+
+---
+
+## ZIP Layout
+
+```
+[Local File Header]
+[Compressed Data]
+(repeat)
+[Central Directory]
+[EOCD]
+```
+
+Metadata authority lives in the **Central Directory**.
+
+---
+
+## Local File Header (per-file)
+
+| Offset | Size | Field             |
+| ------ | ---- | ----------------- |
+| 0x00   | 4    | Signature         |
+| 0x04   | 2    | Version Needed    |
+| 0x06   | 2    | Flags             |
+| 0x08   | 2    | Compression       |
+| 0x0A   | 2    | Mod Time          |
+| 0x0C   | 2    | Mod Date          |
+| 0x0E   | 4    | CRC32             |
+| 0x12   | 4    | Compressed Size   |
+| 0x16   | 4    | Uncompressed Size |
+| 0x1A   | 2    | Filename Length   |
+| 0x1C   | 2    | Extra Length      |
+
+⚠️ If **bit 3** of Flags is set → sizes appear in a **Data Descriptor** after payload.
+
+---
+
+## Central Directory Header (Authoritative)
+
+| Offset | Size | Field               |
+| ------ | ---- | ------------------- |
+| 0x00   | 4    | Signature           |
+| 0x04   | 2    | Version Made By     |
+| 0x06   | 2    | Version Needed      |
+| 0x08   | 2    | Flags               |
+| 0x0A   | 2    | Compression         |
+| 0x0C   | 2    | Mod Time            |
+| 0x0E   | 2    | Mod Date            |
+| 0x10   | 4    | CRC32               |
+| 0x14   | 4    | Compressed Size     |
+| 0x18   | 4    | Uncompressed Size   |
+| 0x1C   | 2    | Filename Length     |
+| 0x1E   | 2    | Extra Length        |
+| 0x20   | 2    | Comment Length      |
+| 0x2A   | 4    | Local Header Offset |
+
+---
+
+## EOCD (search backwards)
+
+```
+50 4B 05 06
+```
+
+| Offset | Size | Field              |
+| ------ | ---- | ------------------ |
+| 0x10   | 4    | Central Dir Offset |
+| 0x0C   | 4    | Central Dir Size   |
+
+---
+
+## ZIP64 Extensions
+
+ZIP64 is triggered when any value == `0xFFFFFFFF`.
+
+### ZIP64 EOCD Locator
+
+```
+50 4B 06 07
+```
+
+### ZIP64 EOCD Record
+
+```
+50 4B 06 06
+```
+
+Extra fields include:
+
+* 64-bit sizes
+* 64-bit offsets
+
+---
+
+## ZIP AES Encryption
+
+Detected via **Extra Field Header ID `0x9901`**
+
+AES fields:
+
+* Vendor ID
+* AES strength (128/192/256)
+* Actual compression method
+
+📌 Filenames remain visible unless **Central Directory encryption** is used.
+
+---
+
+## ZIP Parsing Strategy (No Extraction)
+
+1. Seek backwards → EOCD
+2. Detect ZIP64
+3. Read Central Directory
+4. Resolve Local Header Offsets
+
+---
+
+## Minimal Rust ZIP EOCD Parser (raw I/O)
+
+```rust
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+
+fn find_eocd(mut f: &File) -> Option<u64> {
+    let size = f.metadata().ok()?.len();
+    let search = size.min(65557);
+    let mut buf = vec![0u8; search as usize];
+    f.seek(SeekFrom::End(-(search as i64))).ok()?;
+    f.read_exact(&mut buf).ok()?;
+
+    for i in (0..buf.len()-4).rev() {
+        if &buf[i..i+4] == b"PK\x05\x06" {
+            return Some(size - search + i as u64);
+        }
+    }
+    None
+}
+```
+
+---
+
+# ==========================
+
+# FILE: 7Z.md
+
+# ==========================
+
+# 7-Zip (7z) File Format — Parsing Reference
+
+## Signature
+
+```
+37 7A BC AF 27 1C
+```
+
+---
+
+## Layout
+
+```
+[Signature Header]
+[Start Header]
+[Compressed Streams]
+[Main Header]
+```
+
+---
+
+## Start Header (critical jump)
+
+| Offset | Size | Field              |
+| ------ | ---- | ------------------ |
+| 0x08   | 8    | Next Header Offset |
+| 0x10   | 8    | Next Header Size   |
+| 0x18   | 4    | Next Header CRC    |
+
+---
+
+## Encrypted Headers (7z)
+
+If enabled:
+
+* Filenames hidden
+* Directory tree hidden
+* Only container hash possible
+
+Detected by property ID `kEncryptedHeader`.
+
+---
+
+## 7z Parsing Strategy
+
+1. Read Signature
+2. Read Start Header
+3. Seek to Main Header
+4. If encrypted → stop
+5. Otherwise parse property tree
+
+---
+
+## Minimal Rust 7z Header Reader
+
+```rust
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+
+fn read_start_header(mut f: &File) -> Option<(u64, u64)> {
+    let mut hdr = [0u8; 32];
+    f.seek(SeekFrom::Start(0)).ok()?;
+    f.read_exact(&mut hdr).ok()?;
+
+    let offset = u64::from_le_bytes(hdr[8..16].try_into().ok()?);
+    let size = u64::from_le_bytes(hdr[16..24].try_into().ok()?);
+    Some((offset, size))
+}
+```
+
+---
+
+# ==========================
+
+# FILE: structs.md
+
+# ==========================
+
+# Shared Structs & Notes
+
+## ZIP Central Directory Struct (Rust)
+
+```rust
+#[repr(C)]
+pub struct ZipCentralDir {
+    pub sig: u32,
+    pub ver_made: u16,
+    pub ver_need: u16,
+    pub flags: u16,
+    pub comp: u16,
+    pub mod_time: u16,
+    pub mod_date: u16,
+    pub crc32: u32,
+    pub comp_size: u32,
+    pub uncomp_size: u32,
+    pub fname_len: u16,
+    pub extra_len: u16,
+    pub comment_len: u16,
+    pub lho: u32,
+}
+```
+
+---
+
+## Forensic Notes
+
+* Container hash = metadata + payload
+* ZIP allows metadata-only tampering
+* 7z solid blocks invalidate entire archive
+* Encrypted headers → filenames unrecoverable
+
+---
+
+## Report-Safe Language
+
+> Archive metadata was parsed directly from format-defined header and directory structures using byte-accurate offsets without decompression.
+
+Got you. Clean. Surgical. Copy-paste friendly.
+Each file below is its own fenced Markdown block — no mixing, no scrolling gymnastics.
+
+⸻
+
+📁 NESTED.md
+
+# Nested Container Traversal (Forensic)
+
+## Definition
+A nested container is a container file that exists **inside another container**, e.g.:
+- outer.zip → inner.zip
+- outer.7z → docs.zip
+- zip → disk.img → partition → files.zip
+
+## Traversal Goals
+- Preserve **container-level integrity**
+- Build a **virtual evidence tree**
+- Hash **each layer independently**
+
+---
+
+## Traversal Modes
+
+### Mode A — Container-Only (Fast, Safe)
+- Hash the container as raw bytes
+- Parse headers only (no payload decoding)
+- Identify possible nested containers by name/magic
+
+Use when:
+- encrypted headers exist
+- triage or chain-of-custody is priority
+
+### Mode B — Logical Traversal (Deep)
+- Extract/decode entry payload
+- If payload is a container → recurse
+- Optionally hash extracted content
+
+Use when:
+- content inspection is required
+- nested archives must be verified
+
+---
+
+## Practical Constraints (ZIP / 7z)
+- ZIP: inner container requires decompression of entry data
+- 7z: inner container requires decoding pipeline (hard no-deps)
+- No-deps mode can:
+  - detect candidates (extension + magic)
+  - export payloads for later parsing
+
+---
+
+## Magic Detection Heuristics
+
+| Format | Magic |
+|------|------|
+| ZIP | `50 4B 03 04`, `50 4B 01 02`, `50 4B 05 06` |
+| 7z | `37 7A BC AF 27 1C` |
+| RAR4 | `52 61 72 21 1A 07 00` |
+| RAR5 | `52 61 72 21 1A 07 01 00` |
+| GZIP | `1F 8B` |
+| TAR | `ustar` @ offset 257 |
+| ISO | `CD001` @ sector 0x8001 |
+
+---
+
+## Recommended Data Model
+- Root node = outermost container
+- Child nodes = entries
+- Nested containers = nodes with children
+- Each node stores:
+  - container hash
+  - declared checksums
+  - observed hashes (optional)
+
+
+⸻
+
+📁 ZIP_DATA_DESCRIPTOR.md
+
+# ZIP Data Descriptor Parsing
+
+ZIP allows streaming archives where sizes and CRC are not known when the Local File Header is written.
+
+---
+
+## Trigger Condition
+General Purpose Bit Flag:
+- **bit 3 (0x0008)** set → Data Descriptor present
+
+---
+
+## Descriptor Formats
+
+### With signature (common)
+
+50 4B 07 08   (optional)
+CRC32         4 bytes (LE)
+CompSize      4 bytes (ZIP32)
+UncompSize    4 bytes (ZIP32)
+
+### Without signature (allowed)
+
+CRC32 | CompSize | UncompSize
+
+### ZIP64-style (seen in practice)
+
+CRC32 (4)
+CompSize (8)
+UncompSize (8)
+
+---
+
+## Forensic-Safe Parsing Strategy
+Do **not** rely on Local File Header values.
+
+Use Central Directory as authoritative:
+- CRC32
+- compressed size
+- uncompressed size
+
+Compute descriptor offset:
+
+data_start = local_header_offset + 30 + filename_len + extra_len
+data_end   = data_start + compressed_size
+dd_offset  = data_end
+
+Validate:
+- CRC matches Central Directory CRC
+- sizes match Central Directory (or ZIP64-resolved values)
+
+No decompression required.
+
+---
+
+## Why This Matters
+- Prevents false corruption flags
+- Handles streaming ZIPs correctly
+- Avoids trusting untrusted local headers
+
+
+⸻
+
+📁 CRC_VS_CRYPTO.md
+
+# CRC vs Cryptographic Hashes (Forensic Use)
+
+---
+
+## CRC32 (ZIP / 7z)
+CRC32 is an **error-detection checksum**, not a security hash.
+
+### CRC32 is good for:
+- detecting accidental corruption
+- validating extraction correctness
+- fast internal consistency checks
+
+### CRC32 is NOT good for:
+- collision resistance
+- tamper resistance
+- evidentiary integrity
+
+---
+
+## Cryptographic Hashes (MD5 / SHA-1 / SHA-256)
+
+Designed for:
+- collision resistance
+- preimage resistance
+- adversarial environments
+
+### Forensics Standard Practice
+- **Container hash** (MD5/SHA-256): chain-of-custody
+- **File hash** (SHA-256 preferred): content verification
+
+---
+
+## Correct Relationship
+
+| Purpose | Use |
+|------|----|
+| Extraction verification | CRC32 |
+| Evidence integrity | Cryptographic hash |
+| Court testimony | Cryptographic hash |
+
+---
+
+## Report-Safe Language
+> CRC values were used as format-native consistency checks.  
+> Cryptographic hashes were used to verify evidentiary integrity.
+
+
+⸻
+
+📁 AFF4_AD1_PARITY.md
+
+# AFF4 / AD1 Parity Model with ZIP / 7z
+
+This document defines how compressed archives and forensic containers should be treated **uniformly** in tooling.
+
+---
+
+## Integrity Layers
+
+### Layer 1 — Container as Blob
+- ZIP / 7z: hash the archive file bytes
+- AD1 / AFF4: hash container or segment set
+
+Purpose:
+- chain-of-custody
+- storage integrity
+
+---
+
+### Layer 2 — Logical Contents
+- ZIP / 7z: directory entries from headers
+- AD1: logical evidence records
+- AFF4: URN / RDF object graph
+
+Purpose:
+- file discovery
+- logical evidence view
+
+---
+
+### Layer 3 — Declared vs Observed Hashes
+- ZIP: CRC32 per entry
+- 7z: CRCs (if present)
+- AD1 / AFF4: tool-dependent metadata hashes
+
+Best practice:
+- store **declared hash**
+- compute **observed hash**
+- compare + log mismatch
+
+---
+
+## Feature Parity Table
+
+| Feature | ZIP | 7z | AD1 | AFF4 |
+|------|----|----|----|----|
+| Central index | ✅ | ✅ | ✅ | ✅ |
+| Per-file checksum | CRC32 | CRC | tool-dependent | impl-dependent |
+| Encrypted filenames | rare | ✅ | tool-dependent | possible |
+| Random access | ✅ | ✅ | ✅ | ✅ |
+| Forensic provenance | ❌ | ❌ | ✅ | ✅ |
+| Segmentation | ❌ | ❌ | sometimes | common |
+
+---
+
+## Unified Container Interface (Conceptual)
+
+All containers should expose:
+- `list_entries()`
+- `open_entry_stream(id)`
+- `get_entry_metadata()`
+- `get_declared_hashes()`
+
+ZIP, 7z, AD1, AFF4 become interchangeable at the CORE layer.
+
+

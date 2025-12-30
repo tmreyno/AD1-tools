@@ -1,3 +1,85 @@
+//! RAW Disk Image Parser
+//!
+//! This module provides parsing and verification for raw (dd-style) forensic
+//! disk images, supporting both single-file and multi-segment formats.
+//!
+//! ## Supported Formats
+//!
+//! | Extension     | Description                           |
+//! |---------------|---------------------------------------|
+//! | `.dd`         | Standard dd-style raw image           |
+//! | `.raw`        | Generic raw disk image                |
+//! | `.img`        | Disk image (verify magic to disambiguate) |
+//! | `.001`-`.999` | Multi-segment numbered format         |
+//!
+//! ## Multi-Segment Images
+//!
+//! Raw images can be split into numbered segments:
+//!
+//! ```text
+//! evidence.001  ─┐
+//! evidence.002   │  Combined: Single contiguous byte stream
+//! evidence.003   │  representing the original disk image
+//! evidence.004  ─┘
+//! ```
+//!
+//! Segment discovery:
+//! 1. Detect if input file has numeric extension (.001, .002, etc.)
+//! 2. Scan directory for matching basename with sequential numbers
+//! 3. Sort segments by number, verify no gaps
+//! 4. Concatenate virtually for seamless reading
+//!
+//! ## RawHandle
+//!
+//! The `RawHandle` provides a virtual file-like interface over segmented images:
+//!
+//! ```rust,ignore
+//! let mut handle = RawHandle::open("/evidence/disk.001")?;
+//!
+//! // Read seamlessly across segment boundaries
+//! let mut buf = vec![0u8; 1024];
+//! let bytes_read = handle.read(&mut buf)?;
+//!
+//! // Total size spans all segments
+//! let total_size = handle.total_size();
+//! ```
+//!
+//! ## Hash Verification
+//!
+//! High-performance hashing with algorithm-specific optimizations:
+//!
+//! | Algorithm | Implementation                              |
+//! |-----------|---------------------------------------------|
+//! | BLAKE3    | Memory-mapped I/O + rayon parallel hashing  |
+//! | XXH3      | Memory-mapped I/O, extremely fast           |
+//! | SHA-256   | Pipelined: async I/O → hasher thread        |
+//! | MD5       | Pipelined I/O (legacy, not recommended)     |
+//!
+//! ```rust,ignore
+//! // Verify with progress callback
+//! raw::verify_with_progress("/evidence/disk.001", "sha256", |current, total| {
+//!     let percent = (current as f64 / total as f64) * 100.0;
+//!     println!("Progress: {:.1}%", percent);
+//! })?;
+//! ```
+//!
+//! ## Forensic Notes
+//!
+//! - Raw images preserve **physical** disk layout (sector-by-sector)
+//! - No compression or metadata - pure byte-for-byte copy
+//! - Hash of raw image = hash of original disk
+//! - Segment boundaries have NO forensic significance
+//!   (they're just split points, not disk boundaries)
+//! - For evidentiary purposes, always hash the **complete** image
+//!
+//! ## Performance
+//!
+//! Buffer sizes and threading are tuned for modern storage:
+//! - 16MB I/O buffers for sequential throughput
+//! - Memory-mapped I/O for >64MB files
+//! - Parallel hashing for BLAKE3
+//! - Pipelined I/O for other algorithms
+
 // RAW disk image parser (.dd, .raw, .img, .001, .002, etc.)
 // Supports single and multi-segment raw forensic images
 
@@ -7,8 +89,9 @@ use std::io::{Read, Seek, SeekFrom, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use tracing::{debug, trace, info, instrument};
 
-use crate::common::{BUFFER_SIZE, hash::StreamingHasher};
+use crate::common::{BUFFER_SIZE, hash::StreamingHasher, segments::discover_numbered_segments};
 
 // =============================================================================
 // Public Types
@@ -141,7 +224,9 @@ impl RawHandle {
 // =============================================================================
 
 /// Get information about a raw image
+#[instrument]
 pub fn info(path: &str) -> Result<RawInfo, String> {
+    debug!("Getting raw image info");
     let handle = RawHandle::open(path)?;
     
     // Extract just filenames for display
@@ -150,6 +235,12 @@ pub fn info(path: &str) -> Result<RawInfo, String> {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default())
         .collect();
+    
+    debug!(
+        segment_count = handle.segment_count(),
+        total_size = handle.total_size(),
+        "Raw image info loaded"
+    );
     
     Ok(RawInfo {
         segment_count: handle.segment_count() as u32,
@@ -175,6 +266,7 @@ pub fn is_raw(path: &str) -> Result<bool, String> {
     
     // Check common raw extensions
     if lower.ends_with(".dd") || lower.ends_with(".raw") || lower.ends_with(".img") {
+        trace!(path, "Detected as raw by extension");
         return Ok(true);
     }
     
@@ -195,10 +287,12 @@ pub fn verify(path: &str, algorithm: &str) -> Result<String, String> {
 }
 
 /// Verify with progress callback - OPTIMIZED with pipelined I/O and hashing
+#[instrument(skip(progress_callback))]
 pub fn verify_with_progress<F>(path: &str, algorithm: &str, progress_callback: F) -> Result<String, String>
 where
     F: FnMut(u64, u64)
 {
+    debug!("Starting raw image verification");
     let handle = RawHandle::open(path)?;
     let total_size = handle.total_size();
     let algorithm_lower = algorithm.to_lowercase();
@@ -206,27 +300,36 @@ where
     // Validate algorithm
     let valid_algo = matches!(algorithm_lower.as_str(), 
         "md5" | "sha1" | "sha-1" | "sha256" | "sha-256" | 
-        "sha512" | "sha-512" | "blake3" | "blake2" | "blake2b");
+        "sha512" | "sha-512" | "blake3" | "blake2" | "blake2b" |
+        "xxh3" | "xxh64" | "crc32");
     
     if !valid_algo {
-        return Err(format!("Unsupported algorithm: {}. Supported: md5, sha1, sha256, sha512, blake3, blake2", algorithm));
+        return Err(format!("Unsupported algorithm: {}. Supported: md5, sha1, sha256, sha512, blake3, blake2, xxh3, xxh64, crc32", algorithm));
     }
+
+    debug!(algorithm = algorithm_lower.as_str(), total_size, "Verifying with algorithm");
 
     // For BLAKE3, use its built-in parallel hashing with memory-mapped I/O
     if algorithm_lower == "blake3" {
         return verify_blake3_optimized(path, total_size, progress_callback);
+    }
+    
+    // For XXH3, use memory-mapped I/O for maximum speed
+    if algorithm_lower == "xxh3" {
+        return verify_xxh3_optimized(path, total_size, progress_callback);
     }
 
     // For other algorithms, use pipelined I/O -> hashing
     verify_pipelined(path, &algorithm_lower, total_size, progress_callback)
 }
 
-/// BLAKE3 optimized path - uses rayon-based parallel hashing
+/// BLAKE3 optimized path - uses memory-mapped I/O + rayon parallel hashing
 fn verify_blake3_optimized<F>(path: &str, total_size: u64, mut progress_callback: F) -> Result<String, String>
 where
     F: FnMut(u64, u64)
 {
-    use std::io::BufRead;
+    use memmap2::Mmap;
+    use crate::common::MMAP_THRESHOLD;
     
     let mut hasher = blake3::Hasher::new();
     let segments = discover_segments(path)?.0;
@@ -237,28 +340,118 @@ where
     for seg_path in &segments {
         let file = File::open(seg_path)
             .map_err(|e| format!("Failed to open segment: {}", e))?;
-        let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+        let seg_size = file.metadata()
+            .map_err(|e| format!("Failed to get segment size: {}", e))?
+            .len();
         
-        loop {
-            let buf = reader.fill_buf()
-                .map_err(|e| format!("Read error: {}", e))?;
-            let len = buf.len();
-            if len == 0 { break; }
+        // Use memory-mapped I/O for large segments (faster than buffered read)
+        if seg_size >= MMAP_THRESHOLD {
+            // SAFETY: File is opened read-only, mmap is safe for read access
+            let mmap = unsafe { Mmap::map(&file) }
+                .map_err(|e| format!("Failed to memory-map segment: {}", e))?;
             
-            // BLAKE3 update_rayon uses all cores for parallel hashing
-            hasher.update_rayon(buf);
-            reader.consume(len);
+            // Process in chunks for progress reporting
+            let chunk_size = BUFFER_SIZE;
+            for chunk in mmap.chunks(chunk_size) {
+                hasher.update_rayon(chunk);
+                bytes_processed += chunk.len() as u64;
+                
+                if bytes_processed - last_report >= report_interval {
+                    progress_callback(bytes_processed, total_size);
+                    last_report = bytes_processed;
+                }
+            }
+        } else {
+            // Small files: use buffered read
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::with_capacity(BUFFER_SIZE, file);
             
-            bytes_processed += len as u64;
-            if bytes_processed - last_report >= report_interval {
-                progress_callback(bytes_processed, total_size);
-                last_report = bytes_processed;
+            loop {
+                let buf = reader.fill_buf()
+                    .map_err(|e| format!("Read error: {}", e))?;
+                let len = buf.len();
+                if len == 0 { break; }
+                
+                hasher.update_rayon(buf);
+                reader.consume(len);
+                
+                bytes_processed += len as u64;
+                if bytes_processed - last_report >= report_interval {
+                    progress_callback(bytes_processed, total_size);
+                    last_report = bytes_processed;
+                }
             }
         }
     }
     
     progress_callback(total_size, total_size);
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// XXH3 optimized path - uses memory-mapped I/O for maximum speed
+/// XXH3 is ~10x faster than SHA-256 for non-cryptographic checksums
+fn verify_xxh3_optimized<F>(path: &str, total_size: u64, mut progress_callback: F) -> Result<String, String>
+where
+    F: FnMut(u64, u64)
+{
+    use memmap2::Mmap;
+    use xxhash_rust::xxh3::Xxh3;
+    use crate::common::MMAP_THRESHOLD;
+    
+    let mut hasher = Xxh3::new();
+    let segments = discover_segments(path)?.0;
+    let mut bytes_processed = 0u64;
+    let report_interval = (total_size / 50).max(BUFFER_SIZE as u64);
+    let mut last_report = 0u64;
+    
+    for seg_path in &segments {
+        let file = File::open(seg_path)
+            .map_err(|e| format!("Failed to open segment: {}", e))?;
+        let seg_size = file.metadata()
+            .map_err(|e| format!("Failed to get segment size: {}", e))?
+            .len();
+        
+        // Use memory-mapped I/O for large segments
+        if seg_size >= MMAP_THRESHOLD {
+            let mmap = unsafe { Mmap::map(&file) }
+                .map_err(|e| format!("Failed to memory-map segment: {}", e))?;
+            
+            // Process in chunks for progress reporting
+            let chunk_size = BUFFER_SIZE;
+            for chunk in mmap.chunks(chunk_size) {
+                hasher.update(chunk);
+                bytes_processed += chunk.len() as u64;
+                
+                if bytes_processed - last_report >= report_interval {
+                    progress_callback(bytes_processed, total_size);
+                    last_report = bytes_processed;
+                }
+            }
+        } else {
+            // Small files: use buffered read
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::with_capacity(BUFFER_SIZE, file);
+            
+            loop {
+                let buf = reader.fill_buf()
+                    .map_err(|e| format!("Read error: {}", e))?;
+                let len = buf.len();
+                if len == 0 { break; }
+                
+                hasher.update(buf);
+                reader.consume(len);
+                
+                bytes_processed += len as u64;
+                if bytes_processed - last_report >= report_interval {
+                    progress_callback(bytes_processed, total_size);
+                    last_report = bytes_processed;
+                }
+            }
+        }
+    }
+    
+    progress_callback(total_size, total_size);
+    Ok(format!("{:016x}", hasher.digest128()))
 }
 
 /// Pipelined verification: I/O thread feeds data to hashing thread
@@ -367,6 +560,7 @@ pub struct SegmentVerifyResult {
 }
 
 /// Verify a single segment file and return hash - OPTIMIZED with buffered I/O
+#[instrument(skip(progress_callback))]
 pub fn hash_single_segment<F>(segment_path: &str, algorithm: &str, mut progress_callback: F) -> Result<String, String>
 where
     F: FnMut(u64, u64)
@@ -382,6 +576,8 @@ where
         .map_err(|e| format!("Failed to get file metadata: {}", e))?;
     let total_size = metadata.len();
     
+    debug!(segment_path, algorithm, total_size, "Hashing single segment");
+    
     let file = File::open(path)
         .map_err(|e| format!("Failed to open segment: {}", e))?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
@@ -390,6 +586,7 @@ where
     
     // For BLAKE3, use parallel hashing for best performance
     if algorithm_lower == "blake3" {
+        trace!("Using BLAKE3 parallel hashing");
         let mut hasher = blake3::Hasher::new();
         let mut bytes_read_total = 0u64;
         let report_interval = (total_size / 20).max(BUFFER_SIZE as u64);
@@ -412,7 +609,9 @@ where
         }
         
         progress_callback(total_size, total_size);
-        return Ok(hasher.finalize().to_hex().to_string());
+        let hash = hasher.finalize().to_hex().to_string();
+        info!(segment_path, hash = hash.as_str(), "Segment hash complete");
+        return Ok(hash);
     }
     
     // For other algorithms, use StreamingHasher
@@ -471,155 +670,13 @@ pub fn extract(path: &str, output_path: &str) -> Result<(), String> {
 }
 
 // =============================================================================
-// Helper Functions
+// Helper Functions  
 // =============================================================================
 
-/// Discover all segments for a raw image
-fn discover_segments(path: &str) -> Result<(Vec<PathBuf>, Vec<u64>), String> {
-    let path_obj = Path::new(path);
-    let parent = path_obj.parent().unwrap_or(Path::new("."));
-    let filename = path_obj.file_name()
-        .ok_or("Invalid filename")?
-        .to_string_lossy();
-
-    let lower = filename.to_lowercase();
-    
-    // Check if this is a numbered segment (.001, .002, etc.)
-    if let Some(ext_start) = lower.rfind('.') {
-        let ext = &lower[ext_start + 1..];
-        if ext.len() == 3 && ext.chars().all(|c| c.is_ascii_digit()) {
-            // Multi-segment numbered format
-            let base = &filename[..filename.len() - 4]; // Remove .XXX
-            return discover_numbered_segments(parent, base);
-        }
-    }
-
-    // Single file or other format - just use the one file
-    let size = std::fs::metadata(path)
-        .map_err(|e| format!("Failed to get file size: {}", e))?
-        .len();
-    
-    Ok((vec![path_obj.to_path_buf()], vec![size]))
-}
-
-/// Discover numbered segments (.001, .002, etc.)
-/// Handles cases where segments might start from a number other than 001
-fn discover_numbered_segments(dir: &Path, base: &str) -> Result<(Vec<PathBuf>, Vec<u64>), String> {
-    // First try direct path construction
-    let result = discover_numbered_segments_direct(dir, base);
-    if let Ok((segs, _)) = &result {
-        if !segs.is_empty() {
-            return result;
-        }
-    }
-    
-    // Fall back to directory scan for case-insensitive matching
-    discover_numbered_segments_scan(dir, base)
-}
-
-/// Try to find segments by constructing paths directly
-fn discover_numbered_segments_direct(dir: &Path, base: &str) -> Result<(Vec<PathBuf>, Vec<u64>), String> {
-    let mut segments = Vec::new();
-    let mut sizes = Vec::new();
-    let mut found_any = false;
-    let mut consecutive_missing = 0;
-
-    for num in 1..=999 {
-        let segment_name = format!("{}.{:03}", base, num);
-        let segment_path = dir.join(&segment_name);
-        
-        // Try original case first
-        if segment_path.exists() {
-            let size = std::fs::metadata(&segment_path)
-                .map_err(|e| format!("Failed to get segment size: {}", e))?
-                .len();
-            segments.push(segment_path);
-            sizes.push(size);
-            found_any = true;
-            consecutive_missing = 0;
-            continue;
-        }
-        
-        // Try lowercase
-        let segment_name_lower = segment_name.to_lowercase();
-        let segment_path_lower = dir.join(&segment_name_lower);
-        if segment_path_lower.exists() {
-            let size = std::fs::metadata(&segment_path_lower)
-                .map_err(|e| format!("Failed to get segment size: {}", e))?
-                .len();
-            segments.push(segment_path_lower);
-            sizes.push(size);
-            found_any = true;
-            consecutive_missing = 0;
-            continue;
-        }
-        
-        // Try uppercase
-        let segment_name_upper = segment_name.to_uppercase();
-        let segment_path_upper = dir.join(&segment_name_upper);
-        if segment_path_upper.exists() {
-            let size = std::fs::metadata(&segment_path_upper)
-                .map_err(|e| format!("Failed to get segment size: {}", e))?
-                .len();
-            segments.push(segment_path_upper);
-            sizes.push(size);
-            found_any = true;
-            consecutive_missing = 0;
-            continue;
-        }
-        
-        // Segment not found
-        consecutive_missing += 1;
-        
-        // If we've found segments before and now have a gap, stop
-        if found_any {
-            break; // End of sequence
-        } else if consecutive_missing > 10 {
-            // Haven't found any and checked first 10 numbers - give up
-            break;
-        }
-    }
-
-    Ok((segments, sizes))
-}
-
-/// Scan directory to find segments with case-insensitive matching
-fn discover_numbered_segments_scan(dir: &Path, base: &str) -> Result<(Vec<PathBuf>, Vec<u64>), String> {
-    let base_lower = base.to_lowercase();
-    let mut found_segments: Vec<(u32, PathBuf, u64)> = Vec::new();
-    
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let filename = entry.file_name().to_string_lossy().to_string();
-            let filename_lower = filename.to_lowercase();
-            
-            // Check if filename matches our pattern (base.XXX where XXX is numeric)
-            if let Some(dot_pos) = filename_lower.rfind('.') {
-                let file_base = &filename_lower[..dot_pos];
-                let ext = &filename_lower[dot_pos + 1..];
-                
-                if file_base == base_lower && ext.len() == 3 && ext.chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(num) = ext.parse::<u32>() {
-                        if let Ok(meta) = entry.metadata() {
-                            found_segments.push((num, entry.path(), meta.len()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    if found_segments.is_empty() {
-        return Err("No segments found".to_string());
-    }
-    
-    // Sort by segment number
-    found_segments.sort_by_key(|(num, _, _)| *num);
-    
-    let segments: Vec<PathBuf> = found_segments.iter().map(|(_, p, _)| p.clone()).collect();
-    let sizes: Vec<u64> = found_segments.iter().map(|(_, _, s)| *s).collect();
-    
-    Ok((segments, sizes))
+/// Discover all segments for a raw image - uses common segment discovery
+fn discover_segments(path: &str) -> Result<(Vec<std::path::PathBuf>, Vec<u64>), String> {
+    trace!(path, "Discovering raw image segments");
+    discover_numbered_segments(path)
 }
 
 #[cfg(test)]

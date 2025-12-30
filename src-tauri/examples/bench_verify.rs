@@ -3,9 +3,8 @@ use std::time::Instant;
 extern crate num_cpus;
 extern crate rayon;
 
-// Include the path to parent module
-#[path = "../src/ewf.rs"]
-mod ewf;
+// Use the library's ewf module
+use ffx_check_lib::ewf;
 
 fn main() {
     let path = std::env::args()

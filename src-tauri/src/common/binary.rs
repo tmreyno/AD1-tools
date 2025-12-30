@@ -183,14 +183,14 @@ mod tests {
         temp.write_all(&[0x42]).unwrap(); // u8
         temp.write_all(&[0x34, 0x12]).unwrap(); // u16 = 0x1234
         temp.write_all(&[0x78, 0x56, 0x34, 0x12]).unwrap(); // u32 = 0x12345678
-        temp.write_all(&[0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12]).unwrap(); // u64
+        temp.write_all(&[0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12]).unwrap(); // u64 = 0x1234567890ABCDEF
         
         let mut file = File::open(temp.path()).unwrap();
         
         assert_eq!(read_u8(&mut file).unwrap(), 0x42);
         assert_eq!(read_u16_le(&mut file).unwrap(), 0x1234);
         assert_eq!(read_u32_le(&mut file).unwrap(), 0x12345678);
-        assert_eq!(read_u64_le(&mut file).unwrap(), 0x123456789ABCDEF);
+        assert_eq!(read_u64_le(&mut file).unwrap(), 0x1234567890ABCDEF);
     }
 
     #[test]

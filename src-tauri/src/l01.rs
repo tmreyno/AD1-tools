@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use tracing::{debug, trace, instrument};
 
 use crate::common::binary::{read_u8, read_u32_le, read_u64_le, read_string};
 
@@ -29,11 +30,14 @@ pub struct L01TreeEntry {
     pub size: u64,
 }
 
+#[instrument]
 pub fn info(path: &str) -> Result<L01Info, String> {
+    debug!("Reading L01 info");
     let mut file = open_and_validate(path)?;
     
     // Read L01 header
     let version = read_u32_le(&mut file)?;
+    trace!(version, "L01 format version");
     
     // Read case information string
     let case_info_len = read_u32_le(&mut file)?;
@@ -54,6 +58,7 @@ pub fn info(path: &str) -> Result<L01Info, String> {
         
         // Read metadata entries
         let metadata_count = read_u32_le(&mut file)?;
+        trace!(metadata_count, "Reading metadata entries");
         for _ in 0..metadata_count {
             let key = read_string_with_length(&mut file)?;
             let value = read_string_with_length(&mut file)?;
@@ -66,6 +71,7 @@ pub fn info(path: &str) -> Result<L01Info, String> {
         }
     }
     
+    debug!(file_count, total_size, "L01 info loaded");
     Ok(L01Info {
         format_version: version,
         case_info,
@@ -99,6 +105,7 @@ pub fn build_tree(path: &str) -> Result<Vec<L01TreeEntry>, String> {
         });
     }
     
+    debug!(entry_count = entries.len(), "Built L01 tree");
     Ok(entries)
 }
 
@@ -115,10 +122,13 @@ pub fn is_l01(path: &str) -> Result<bool, String> {
     file.read_exact(&mut signature)
         .map_err(|e| format!("Failed to read signature: {e}"))?;
     
-    Ok(&signature == L01_SIGNATURE)
+    let is_l01 = &signature == L01_SIGNATURE;
+    trace!(path, is_l01, "L01 signature check");
+    Ok(is_l01)
 }
 
 fn open_and_validate(path: &str) -> Result<File, String> {
+    trace!(path, "Opening L01 file");
     let path_obj = Path::new(path);
     if !path_obj.exists() {
         return Err(format!("File not found: {path}"));

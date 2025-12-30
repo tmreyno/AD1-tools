@@ -8,26 +8,26 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use flate2::read::ZlibDecoder;
 use rayon::prelude::*;
+use md5::Md5;
 use sha1::{Sha1, Digest};
 use sha2::{Sha256, Sha512};
 use blake2::Blake2b512;
 use blake3::Hasher as Blake3Hasher;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh64::Xxh64;
+use chrono;
+use tracing::{debug, trace};
 
-use crate::common::{BUFFER_SIZE, hash::StreamingHasher, binary::{read_u32_le, read_u64_le}};
-
-// Debug macro - only prints when E01_DEBUG env var is set
-#[allow(unused_macros)]
-macro_rules! debug_print {
-    ($($arg:tt)*) => {
-        if cfg!(debug_assertions) && std::env::var("E01_DEBUG").is_ok() {
-            eprintln!($($arg)*);
-        }
-    };
-}
+use crate::common::{
+    BUFFER_SIZE, 
+    FileIoPool,
+    hash::StreamingHasher, 
+    binary::{read_u32_le, read_u64_le},
+    segments::discover_e01_segments,
+};
 
 // =============================================================================
 // Stored Hash Types - Hashes embedded in EWF file headers
@@ -52,68 +52,6 @@ const EWF2_SIGNATURE: &[u8; 8] = b"EVF2\x0d\x0a\x81\x00";
 #[allow(dead_code)]
 const SECTOR_SIZE: u64 = 512;
 const MAX_OPEN_FILES: usize = 16; // Like libewf's rlimit handling
-
-// =============================================================================
-// File I/O Pool - Like libbfio_pool
-// =============================================================================
-
-/// Manages multiple file handles with LRU caching
-/// Limits number of simultaneously open files
-struct FileIoPool {
-    /// Paths to all segment files in order
-    file_paths: Vec<PathBuf>,
-    /// Currently open file handles (file_index -> File)
-    open_handles: HashMap<usize, File>,
-    /// LRU queue for file handle management
-    lru_queue: VecDeque<usize>,
-    /// Maximum number of simultaneously open files
-    max_open: usize,
-}
-
-impl FileIoPool {
-    fn new(file_paths: Vec<PathBuf>, max_open: usize) -> Self {
-        Self {
-            file_paths,
-            open_handles: HashMap::new(),
-            lru_queue: VecDeque::new(),
-            max_open,
-        }
-    }
-
-    /// Get a file handle, opening it if necessary and managing LRU cache
-    fn get_file(&mut self, file_index: usize) -> Result<&mut File, String> {
-        // If file is already open, move to front of LRU queue
-        if self.open_handles.contains_key(&file_index) {
-            // Remove from current position in LRU
-            self.lru_queue.retain(|&x| x != file_index);
-            // Add to front
-            self.lru_queue.push_front(file_index);
-            return Ok(self.open_handles.get_mut(&file_index).unwrap());
-        }
-
-        // Need to open the file - check if we need to close one first
-        if self.open_handles.len() >= self.max_open {
-            // Close least recently used file
-            if let Some(lru_index) = self.lru_queue.pop_back() {
-                self.open_handles.remove(&lru_index);
-            }
-        }
-
-        // Open the new file
-        let file_path = &self.file_paths[file_index];
-        let file = File::open(file_path)
-            .map_err(|e| format!("Failed to open segment {}: {}", file_index, e))?;
-        
-        self.open_handles.insert(file_index, file);
-        self.lru_queue.push_front(file_index);
-        
-        Ok(self.open_handles.get_mut(&file_index).unwrap())
-    }
-
-    fn get_file_count(&self) -> usize {
-        self.file_paths.len()
-    }
-}
 
 // =============================================================================
 // Section Descriptors - EWF Format Structures
@@ -178,11 +116,11 @@ struct TableSection {
 }
 
 // =============================================================================
-// Chunk Cache - Like libfcache
+// Chunk Cache - Like libfcache (optimized with Arc to avoid cloning)
 // =============================================================================
 
 struct ChunkCache {
-    cache: HashMap<usize, Vec<u8>>,
+    cache: HashMap<usize, Arc<Vec<u8>>>,
     lru_queue: VecDeque<usize>,
     max_entries: usize,
 }
@@ -196,12 +134,12 @@ impl ChunkCache {
         }
     }
 
-    fn get(&mut self, chunk_index: usize) -> Option<Vec<u8>> {
+    fn get(&mut self, chunk_index: usize) -> Option<Arc<Vec<u8>>> {
         if let Some(data) = self.cache.get(&chunk_index) {
             // Move to front of LRU
             self.lru_queue.retain(|&x| x != chunk_index);
             self.lru_queue.push_front(chunk_index);
-            return Some(data.clone());
+            return Some(Arc::clone(data));  // Cheap Arc clone, not data clone
         }
         None
     }
@@ -214,7 +152,7 @@ impl ChunkCache {
             }
         }
 
-        self.cache.insert(chunk_index, data);
+        self.cache.insert(chunk_index, Arc::new(data));
         self.lru_queue.push_front(chunk_index);
     }
 }
@@ -255,7 +193,7 @@ impl E01Handle {
     /// Open E01 file set (like libewf_handle_open)
     pub fn open(path: &str) -> Result<Self, String> {
         // Step 1: Discover all segment files (like libewf_glob)
-        let segment_paths = discover_segments(path)?;
+        let segment_paths = discover_e01_segments(path)?;
         
         // Step 2: Create file I/O pool
         let mut file_pool = FileIoPool::new(segment_paths, MAX_OPEN_FILES);
@@ -317,11 +255,11 @@ impl E01Handle {
         let mut section_count = 0;
         const MAX_SECTIONS: u32 = 10000;
         
-        debug_print!("Starting global section walk...");
+        trace!("Starting global section walk...");
         
         loop {
             if section_count >= MAX_SECTIONS {
-                debug_print!("Reached max sections limit");
+                trace!("Reached max sections limit");
                 break;
             }
             section_count += 1;
@@ -331,7 +269,7 @@ impl E01Handle {
             
             // Check if we have enough space for section descriptor
             if offset_in_seg + 32 > segment_sizes[seg_idx] {
-                debug_print!("Not enough space for section descriptor at global offset {}", current_global_offset);
+                trace!("Not enough space for section descriptor at global offset {}", current_global_offset);
                 break;
             }
             
@@ -340,7 +278,7 @@ impl E01Handle {
             let section_desc = match Self::read_section_descriptor(file, offset_in_seg) {
                 Ok(desc) => desc,
                 Err(e) => {
-                    debug_print!("Failed to read section at global offset {}: {}", current_global_offset, e);
+                    trace!("Failed to read section at global offset {}: {}", current_global_offset, e);
                     break;
                 }
             };
@@ -349,7 +287,7 @@ impl E01Handle {
                 .trim_matches('\0')
                 .to_string();
             
-            debug_print!("Section '{}' at global offset {} (seg {}, offset {})", 
+            trace!("Section '{}' at global offset {} (seg {}, offset {})", 
                      section_type, current_global_offset, seg_idx, offset_in_seg);
             
             // Create section entry
@@ -391,10 +329,10 @@ impl E01Handle {
                     seg_section.data_offset = Some(data_global_offset);
                     
                     if let Some(sectors_base) = last_sectors_offset {
-                        debug_print!("  Reading {} at seg {} offset {}, sectors_base={}", section_type, data_seg_idx, data_offset_in_seg, sectors_base);
+                        trace!("  Reading {} at seg {} offset {}, sectors_base={}", section_type, data_seg_idx, data_offset_in_seg, sectors_base);
                         let file = file_pool.get_file(data_seg_idx)?;
                         if let Ok(table) = Self::read_table_section(file, data_offset_in_seg, section_desc.size, sectors_base) {
-                            debug_print!("  Table has {} chunk offsets, base_offset={}", table.offsets.len(), table.base_offset);
+                            trace!("  Table has {} chunk offsets, base_offset={}", table.offsets.len(), table.base_offset);
                             // Add chunk locations from this table
                             for (chunk_in_table, &offset) in table.offsets.iter().enumerate() {
                                 chunk_locations.push(ChunkLocation {
@@ -409,15 +347,15 @@ impl E01Handle {
                             }
                             seg_section.table_data = Some(table);
                         } else {
-                            debug_print!("  Failed to read table section");
+                            trace!("  Failed to read table section");
                         }
                     } else {
-                        debug_print!("  Skipping {} - no sectors_base set", section_type);
+                        trace!("  Skipping {} - no sectors_base set", section_type);
                     }
                 }
                 "table2" => {
                     // table2 sections contain checksums, not chunk offsets - skip them
-                    debug_print!("  Skipping table2 section (contains checksums)");
+                    trace!("  Skipping table2 section (contains checksums)");
                 }
                 "hash" => {
                     // Hash section contains MD5 hash (16 bytes)
@@ -426,7 +364,7 @@ impl E01Handle {
                     let (data_seg_idx, data_offset_in_seg) = Self::global_to_segment_offset(data_global_offset, segment_sizes)?;
                     
                     if let Ok(hashes) = Self::read_hash_section(file_pool, data_seg_idx, data_offset_in_seg) {
-                        debug_print!("  Found {} hashes in hash section", hashes.len());
+                        trace!("  Found {} hashes in hash section", hashes.len());
                         stored_hashes.extend(hashes);
                     }
                 }
@@ -436,13 +374,13 @@ impl E01Handle {
                     let (data_seg_idx, data_offset_in_seg) = Self::global_to_segment_offset(data_global_offset, segment_sizes)?;
                     
                     if let Ok(hashes) = Self::read_digest_section(file_pool, data_seg_idx, data_offset_in_seg, section_desc.size) {
-                        debug_print!("  Found {} hashes in digest section", hashes.len());
+                        trace!("  Found {} hashes in digest section", hashes.len());
                         stored_hashes.extend(hashes);
                     }
                 }
                 "done" => {
                     segments[seg_idx].sections.push(seg_section);
-                    debug_print!("Reached 'done' section, stopping");
+                    trace!("Reached 'done' section, stopping");
                     break;
                 }
                 "next" => {
@@ -454,10 +392,10 @@ impl E01Handle {
                             seg_idx += 1;
                             let next_segment_start: u64 = segment_sizes.iter().take(seg_idx).sum();
                             current_global_offset = next_segment_start + 13;
-                            debug_print!("Moving to segment {} at global offset {}", seg_idx, current_global_offset);
+                            trace!("Moving to segment {} at global offset {}", seg_idx, current_global_offset);
                             continue;
                         } else {
-                            debug_print!("No more segments, stopping");
+                            trace!("No more segments, stopping");
                             break;
                         }
                     }
@@ -469,7 +407,7 @@ impl E01Handle {
             
             // Move to next section
             if section_desc.next_offset == 0 || section_desc.next_offset == current_global_offset {
-                debug_print!("Section chain ended");
+                trace!("Section chain ended");
                 break;
             }
             
@@ -478,7 +416,7 @@ impl E01Handle {
             current_global_offset = segment_start + section_desc.next_offset;
         }
         
-        debug_print!("Parsed {} sections, {} chunk locations", section_count, chunk_locations.len());
+        trace!("Parsed {} sections, {} chunk locations", section_count, chunk_locations.len());
         
         // If no chunk locations were found but we have volume info and sectors data,
         // try to parse as delta/inline chunk format (used in highly compressed E01s)
@@ -486,7 +424,7 @@ impl E01Handle {
             if let (Some(vol), Some(sectors_offset), Some(sectors_size)) = 
                 (&volume_info, sectors_data_offset, sectors_data_size) 
             {
-                debug_print!("No table found - attempting delta chunk scan at offset {} size {}", 
+                trace!("No table found - attempting delta chunk scan at offset {} size {}", 
                          sectors_offset, sectors_size);
                 
                 if let Ok(delta_locations) = Self::scan_delta_chunks(
@@ -498,7 +436,7 @@ impl E01Handle {
                     vol.sectors_per_chunk,
                     vol.bytes_per_sector,
                 ) {
-                    debug_print!("Found {} delta chunks", delta_locations.len());
+                    trace!("Found {} delta chunks", delta_locations.len());
                     chunk_locations = delta_locations;
                 }
             }
@@ -526,12 +464,12 @@ impl E01Handle {
         let (seg_idx, offset_in_seg) = Self::global_to_segment_offset(current_offset, segment_sizes)?;
         let file = file_pool.get_file(seg_idx)?;
         
-        debug_print!("Scanning delta chunks: sectors_offset={}, sectors_size={}, expected_chunks={}, chunk_size={}", 
+        trace!("Scanning delta chunks: sectors_offset={}, sectors_size={}, expected_chunks={}, chunk_size={}", 
                  sectors_offset, sectors_size, expected_chunks, chunk_size);
         
         for chunk_idx in 0..expected_chunks {
             if current_offset >= end_offset {
-                debug_print!("Delta scan reached end of sectors at chunk {}", chunk_idx);
+                trace!("Delta scan reached end of sectors at chunk {}", chunk_idx);
                 break;
             }
             
@@ -550,7 +488,7 @@ impl E01Handle {
             let data_size = (raw_size & 0x7FFFFFFF) as u64;
             
             if chunk_idx < 5 {
-                debug_print!("  Delta chunk[{}]: offset={}, raw_size={:#x}, compressed={}, data_size={}", 
+                trace!("  Delta chunk[{}]: offset={}, raw_size={:#x}, compressed={}, data_size={}", 
                          chunk_idx, current_offset, raw_size, is_compressed, data_size);
             }
             
@@ -571,7 +509,7 @@ impl E01Handle {
             // Align to next chunk boundary if needed (some formats pad to 4-byte alignment)
             if data_size < chunk_size as u64 && !is_compressed {
                 // For uncompressed, data should be exactly chunk_size, so something's wrong
-                debug_print!("  Warning: uncompressed chunk smaller than expected: {} < {}", data_size, chunk_size);
+                trace!("  Warning: uncompressed chunk smaller than expected: {} < {}", data_size, chunk_size);
             }
         }
         
@@ -604,7 +542,8 @@ impl E01Handle {
         // Check cache first (only if caching enabled)
         if use_cache {
             if let Some(cached_data) = self.chunk_cache.get(chunk_index) {
-                return Ok(cached_data);
+                // Arc::try_unwrap if we're the only owner, else clone the inner Vec
+                return Ok(Arc::try_unwrap(cached_data).unwrap_or_else(|arc| (*arc).clone()));
             }
         }
         
@@ -659,7 +598,7 @@ impl E01Handle {
                 .map_err(|e| format!("Delta chunk {}: offset {} error: {}", chunk_index, data_offset, e))?;
             
             if chunk_index < 3 {
-                debug_print!("Delta chunk {}: sectors_base={} data_offset={} compressed={} seg={} local={}", 
+                trace!("Delta chunk {}: sectors_base={} data_offset={} compressed={} seg={} local={}", 
                          chunk_index, location.sectors_base, data_offset, is_compressed, seg_idx, offset_in_seg);
             }
             
@@ -691,7 +630,7 @@ impl E01Handle {
             let (seg_idx, offset_in_segment) = match Self::global_to_segment_offset(absolute_offset, &segment_sizes) {
                 Ok(result) => result,
                 Err(e) => {
-                    debug_print!("Chunk {}: offset={:#x} compressed={} offset_value={} segment_local={} absolute={} ERROR: {}", 
+                    trace!("Chunk {}: offset={:#x} compressed={} offset_value={} segment_local={} absolute={} ERROR: {}", 
                              chunk_index, location.offset, is_compressed, offset_value, segment_local_offset, absolute_offset, e);
                     return Err(e);
                 }
@@ -699,7 +638,7 @@ impl E01Handle {
             
             // Debug first few chunks
             if chunk_index < 3 {
-                debug_print!("Chunk {}: offset={:#x} compressed={} offset_value={} base_offset={} sectors_base={} absolute={} seg={} local={}", 
+                trace!("Chunk {}: offset={:#x} compressed={} offset_value={} base_offset={} sectors_base={} absolute={} seg={} local={}", 
                          chunk_index, location.offset, is_compressed, offset_value, location.base_offset, location.sectors_base, absolute_offset, seg_idx, offset_in_segment);
             }
             
@@ -714,8 +653,10 @@ impl E01Handle {
         
         // Decompress if needed (chunk_size was calculated at start of function)
         let mut chunk_data = if is_compressed {
-            // For compressed data, use streaming decompression for best pipeline efficiency
-            let mut decoder = ZlibDecoder::new(file.take(chunk_size as u64 * 2));
+            // For compressed data, use buffered reader + streaming decompression
+            // Buffer size of 64KB helps with disk I/O efficiency
+            let buffered = std::io::BufReader::with_capacity(65536, file.take(chunk_size as u64 * 2));
+            let mut decoder = ZlibDecoder::new(buffered);
             let mut decompressed = Vec::with_capacity(chunk_size);
             decoder.read_to_end(&mut decompressed)
                 .map_err(|e| format!("Chunk {} decompression failed at offset {}: {}", chunk_index, offset_in_segment, e))?;
@@ -737,7 +678,7 @@ impl E01Handle {
             let remaining_sectors = self.volume.sector_count % self.volume.sectors_per_chunk as u64;
             if remaining_sectors > 0 {
                 let final_size = (remaining_sectors * self.volume.bytes_per_sector as u64) as usize;
-                debug_print!("Last chunk {}: original size={}, remaining_sectors={}, truncating to {}", 
+                trace!("Last chunk {}: original size={}, remaining_sectors={}, truncating to {}", 
                          chunk_index, chunk_data.len(), remaining_sectors, final_size);
                 if chunk_data.len() > final_size {
                     chunk_data.truncate(final_size);
@@ -789,7 +730,7 @@ impl E01Handle {
     }
 
     fn read_volume_section(file_pool: &mut FileIoPool, file_index: usize, offset: u64) -> Result<VolumeSection, String> {
-        debug_print!("read_volume_section: file_index={}, offset={}", file_index, offset);
+        trace!("read_volume_section: file_index={}, offset={}", file_index, offset);
         
         let file = file_pool.get_file(file_index)?;
         
@@ -797,13 +738,13 @@ impl E01Handle {
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| format!("Seek failed: {}", e))?;
         
-        debug_print!("About to read volume fields at offset {}", offset);
+        trace!("About to read volume fields at offset {}", offset);
         
         // DEBUG: Read and display raw bytes
         let mut raw_bytes = [0u8; 20];
         file.read_exact(&mut raw_bytes)
             .map_err(|e| format!("Read raw bytes failed: {}", e))?;
-        debug_print!("Raw volume bytes: {:02x?}", &raw_bytes);
+        trace!("Raw volume bytes: {:02x?}", &raw_bytes);
         
         // Seek back to re-read the same data
         file.seek(SeekFrom::Start(offset))
@@ -823,10 +764,10 @@ impl E01Handle {
         let bytes_per_sector = read_u32(file)?;
         let sector_count = read_u64(file)?;
         
-        debug_print!("Volume: chunk_count={}, sectors_per_chunk={}, bytes_per_sector={}, sector_count={}", 
+        trace!("Volume: chunk_count={}, sectors_per_chunk={}, bytes_per_sector={}, sector_count={}", 
                  chunk_count, sectors_per_chunk, bytes_per_sector, sector_count);
         
-        debug_print!("Volume section: chunk_count={}, sectors_per_chunk={}, bytes_per_sector={}, sector_count={}", 
+        trace!("Volume section: chunk_count={}, sectors_per_chunk={}, bytes_per_sector={}, sector_count={}", 
                  chunk_count, sectors_per_chunk, bytes_per_sector, sector_count);
         
         Ok(VolumeSection {
@@ -848,7 +789,7 @@ impl E01Handle {
         file.read_exact(&mut header_bytes)
             .map_err(|e| format!("Read header failed: {}", e))?;
         
-        debug_print!("    Raw table header bytes: {:02x?}", &header_bytes);
+        trace!("    Raw table header bytes: {:02x?}", &header_bytes);
         
         // Parse header
         let entry_count = u32::from_le_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]);
@@ -866,9 +807,9 @@ impl E01Handle {
             ((size.saturating_sub(24 + 4)) / 4) as u32
         };
         
-        debug_print!("    Table: entry_count={}, base_offset={}, using_count={}", 
+        trace!("    Table: entry_count={}, base_offset={}, using_count={}", 
                  entry_count, base_offset, chunk_count);
-        debug_print!("    About to read {} offsets starting at file position {}", chunk_count, offset + 24);
+        trace!("    About to read {} offsets starting at file position {}", chunk_count, offset + 24);
         
         let mut offsets = Vec::with_capacity(chunk_count as usize);
         for i in 0..chunk_count {
@@ -881,7 +822,7 @@ impl E01Handle {
                 let is_compressed = (raw_offset & 0x80000000) != 0;
                 let offset_value = raw_offset & 0x7FFFFFFF;
                 let current_pos = file.stream_position().unwrap_or(0);
-                debug_print!("      Offset[{}] at file_pos={}: raw={:#x} compressed={} value={}", 
+                trace!("      Offset[{}] at file_pos={}: raw={:#x} compressed={} value={}", 
                          i, current_pos - 4, raw_offset, is_compressed, offset_value);
             }
         }
@@ -947,35 +888,31 @@ impl E01Handle {
         
         // Read MD5 hash (16 bytes)
         let mut md5_bytes = [0u8; 16];
-        if file.read_exact(&mut md5_bytes).is_ok() {
-            if md5_bytes.iter().any(|&b| b != 0) {
-                let md5_hash = md5_bytes.iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>();
-                hashes.push(StoredImageHash {
-                    algorithm: "MD5".to_string(),
-                    hash: md5_hash,
-                    timestamp: None,  // Will be set from acquiry_date by caller
-                    source: Some("container".to_string()),
-                });
-            }
+        if file.read_exact(&mut md5_bytes).is_ok() && md5_bytes.iter().any(|&b| b != 0) {
+            let md5_hash = md5_bytes.iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+            hashes.push(StoredImageHash {
+                algorithm: "MD5".to_string(),
+                hash: md5_hash,
+                timestamp: None,  // Will be set from acquiry_date by caller
+                source: Some("container".to_string()),
+            });
         }
         
         // Read SHA1 hash (20 bytes) if section is large enough
         if size >= 36 {
             let mut sha1_bytes = [0u8; 20];
-            if file.read_exact(&mut sha1_bytes).is_ok() {
-                if sha1_bytes.iter().any(|&b| b != 0) {
-                    let sha1_hash = sha1_bytes.iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<String>();
-                    hashes.push(StoredImageHash {
-                        algorithm: "SHA1".to_string(),
-                        hash: sha1_hash,
-                        timestamp: None,  // Will be set from acquiry_date by caller
-                        source: Some("container".to_string()),
-                    });
-                }
+            if file.read_exact(&mut sha1_bytes).is_ok() && sha1_bytes.iter().any(|&b| b != 0) {
+                let sha1_hash = sha1_bytes.iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
+                hashes.push(StoredImageHash {
+                    algorithm: "SHA1".to_string(),
+                    hash: sha1_hash,
+                    timestamp: None,  // Will be set from acquiry_date by caller
+                    source: Some("container".to_string()),
+                });
             }
         }
         
@@ -984,43 +921,12 @@ impl E01Handle {
 }
 
 // =============================================================================
-// Helper Functions
+// Helper Functions - Use common module for binary reads
 // =============================================================================
 
-fn discover_segments(base_path: &str) -> Result<Vec<PathBuf>, String> {
-    let path = Path::new(base_path);
-    let parent = path.parent().ok_or("Invalid path")?;
-    let stem = path.file_stem().ok_or("No filename")?.to_string_lossy();
-    
-    let mut paths = vec![path.to_path_buf()];
-    
-    for i in 2..=999 {
-        let segment_name = if i <= 99 {
-            format!("{}.E{:02}", stem, i)
-        } else {
-            format!("{}.Ex{:02}", stem, i - 99)
-        };
-        
-        let segment_path = parent.join(&segment_name);
-        if segment_path.exists() {
-            paths.push(segment_path);
-        } else {
-            break;
-        }
-    }
-    
-    Ok(paths)
-}
-
-// Delegate to common binary read functions
+// Alias for backward compatibility
 fn read_u32(file: &mut File) -> Result<u32, String> {
     read_u32_le(file)
-}
-
-// Read u32 in BIG-ENDIAN format (used for table entry offsets in EWF)
-#[allow(dead_code)]
-fn read_u32_be(file: &mut File) -> Result<u32, String> {
-    crate::common::binary::read_u32_be(file)
 }
 
 fn read_u64(file: &mut File) -> Result<u64, String> {
@@ -1051,6 +957,7 @@ pub struct E01Info {
     pub model: Option<String>,
     pub serial_number: Option<String>,
     pub stored_hashes: Vec<StoredImageHash>,
+    pub segment_files: Option<Vec<String>>,
 }
 
 pub fn info(path: &str) -> Result<E01Info, String> {
@@ -1058,9 +965,41 @@ pub fn info(path: &str) -> Result<E01Info, String> {
     let volume = handle.get_volume_info();
     let total_size = volume.sector_count * volume.bytes_per_sector as u64;
     
+    // Get segment file names
+    let segment_count = handle.file_pool.get_file_count() as u32;
+    let segment_files = if segment_count > 1 {
+        // Get segment paths and extract just filenames
+        let paths = discover_e01_segments(path).unwrap_or_default();
+        let names: Vec<String> = paths.iter()
+            .filter_map(|p| p.file_name())
+            .map(|f| f.to_string_lossy().to_string())
+            .collect();
+        if names.is_empty() { None } else { Some(names) }
+    } else {
+        None
+    };
+    
+    // Get file modification time as fallback timestamp for stored hashes
+    let file_timestamp: Option<String> = Path::new(path).metadata().ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+            datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+        });
+    
+    // Set timestamp on stored hashes from file modification time
+    let stored_hashes: Vec<StoredImageHash> = handle.stored_hashes.iter().map(|h| {
+        StoredImageHash {
+            algorithm: h.algorithm.clone(),
+            hash: h.hash.clone(),
+            timestamp: h.timestamp.clone().or_else(|| file_timestamp.clone()),
+            source: h.source.clone(),
+        }
+    }).collect();
+    
     Ok(E01Info {
         format_version: "EWF1".to_string(), // Default format version
-        segment_count: handle.file_pool.get_file_count() as u32,
+        segment_count,
         chunk_count: handle.get_chunk_count() as u32,
         sector_count: volume.sector_count,
         bytes_per_sector: volume.bytes_per_sector,
@@ -1072,11 +1011,12 @@ pub fn info(path: &str) -> Result<E01Info, String> {
         examiner_name: None,
         evidence_number: None,
         notes: None,
-        acquiry_date: None,
+        acquiry_date: file_timestamp.clone(),
         system_date: None,
         model: None,
         serial_number: None,
-        stored_hashes: handle.stored_hashes.clone(),
+        stored_hashes,
+        segment_files,
     })
 }
 
@@ -1084,6 +1024,7 @@ pub fn info(path: &str) -> Result<E01Info, String> {
 pub fn is_e01(path: &str) -> Result<bool, String> {
     let path_obj = Path::new(path);
     if !path_obj.exists() {
+        debug!("is_e01: file does not exist: {}", path);
         return Ok(false);
     }
     
@@ -1092,24 +1033,30 @@ pub fn is_e01(path: &str) -> Result<bool, String> {
     
     let mut sig = [0u8; 8];
     if file.read_exact(&mut sig).is_err() {
+        debug!("is_e01: failed to read signature from: {}", path);
         return Ok(false);
     }
     
     // Check for EVF (EWF1) or EVF2 (EWF2) signature
-    Ok(&sig == EWF_SIGNATURE || &sig == EWF2_SIGNATURE)
+    let is_ewf1 = &sig == EWF_SIGNATURE;
+    let is_ewf2 = &sig == EWF2_SIGNATURE;
+    debug!("is_e01: {} -> sig={:02x?} ewf1={} ewf2={}", path, &sig, is_ewf1, is_ewf2);
+    Ok(is_ewf1 || is_ewf2)
 }
 
 /// Get all E01 segment file paths
 pub fn get_segment_paths(path: &str) -> Result<Vec<PathBuf>, String> {
-    discover_segments(path)
+    discover_e01_segments(path)
 }
 
-/// Hash a single E01 segment file
+/// Hash a single E01 segment file (uses mmap for large files)
 pub fn hash_single_segment<F>(segment_path: &str, algorithm: &str, mut progress_callback: F) -> Result<String, String>
 where
     F: FnMut(u64, u64)
 {
     use std::io::BufRead;
+    use memmap2::Mmap;
+    use crate::common::MMAP_THRESHOLD;
     
     let path = Path::new(segment_path);
     if !path.exists() {
@@ -1122,11 +1069,50 @@ where
     
     let file = File::open(path)
         .map_err(|e| format!("Failed to open segment: {}", e))?;
-    let mut reader = std::io::BufReader::with_capacity(BUFFER_SIZE, file);
     
     let algorithm_lower = algorithm.to_lowercase();
     
-    // For BLAKE3, use parallel hashing for best performance
+    // For BLAKE3 with large files, use mmap + parallel hashing for best performance
+    if algorithm_lower == "blake3" && total_size >= MMAP_THRESHOLD {
+        // SAFETY: File is opened read-only, mmap is safe for read access
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| format!("Failed to mmap file: {}", e))?;
+        
+        let mut hasher = blake3::Hasher::new();
+        let chunk_size = 64 * 1024 * 1024; // 64MB chunks for progress reporting
+        let mut bytes_processed = 0u64;
+        
+        for chunk in mmap.chunks(chunk_size) {
+            hasher.update_rayon(chunk);
+            bytes_processed += chunk.len() as u64;
+            progress_callback(bytes_processed, total_size);
+        }
+        
+        return Ok(hasher.finalize().to_hex().to_string());
+    }
+    
+    // For large files, use mmap for better I/O performance (MD5, SHA1, SHA256, XXH3, etc.)
+    if total_size >= MMAP_THRESHOLD {
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| format!("Failed to mmap file: {}", e))?;
+        
+        let mut hasher = StreamingHasher::from_str(algorithm)?;
+        let chunk_size = 64 * 1024 * 1024; // 64MB chunks for progress reporting
+        let mut bytes_processed = 0u64;
+        
+        for chunk in mmap.chunks(chunk_size) {
+            hasher.update(chunk);
+            bytes_processed += chunk.len() as u64;
+            progress_callback(bytes_processed, total_size);
+        }
+        
+        return Ok(hasher.finalize());
+    }
+    
+    // Standard BufReader path for smaller files or slower algorithms
+    let mut reader = std::io::BufReader::with_capacity(BUFFER_SIZE, file);
+    
+    // For BLAKE3 without mmap, still use parallel hashing
     if algorithm_lower == "blake3" {
         let mut hasher = blake3::Hasher::new();
         let mut bytes_read_total = 0u64;
@@ -1266,8 +1252,11 @@ where
     use std::sync::mpsc;
     use std::thread;
     
+    debug!(path = %path, "Starting parallel chunk verification");
+    
     let handle = E01Handle::open(path)?;
     let chunk_count = handle.get_chunk_count();
+    debug!(chunk_count, "E01 chunk count");
     
     // Create hasher based on algorithm
     let algorithm_lower = algorithm.to_lowercase();
@@ -1280,25 +1269,41 @@ where
     let use_xxh64 = algorithm_lower == "xxh64" || algorithm_lower == "xxhash64";
     let use_crc32 = algorithm_lower == "crc32";
     
-    // Report progress less frequently - batch reporting to reduce overhead
-    let report_interval = 5000.max(chunk_count / 20);
-    let mut last_reported = 0;
-    
     // Clone path for thread safety
     let path_str = path.to_string();
     
     // Process chunks in parallel batches
     let num_threads = rayon::current_num_threads();
-    // OPTIMIZATION: Smaller batches = more parallelism, more pipeline stages active
-    let batch_size = num_threads * 128; // Reduced from 256 to 128 for better overlap
     
-    debug_print!("Pipelined verification: {} chunks, {} threads, batch_size={}", 
-                 chunk_count, num_threads, batch_size);
+    // OPTIMIZATION: Use larger batch sizes to maximize CPU utilization
+    // More chunks per batch = more parallel decompression work per batch
+    // The key insight: decompression is parallel, hashing is sequential
+    // So we want LARGE batches to give decompression threads more work
+    let batch_size = if chunk_count > 1_000_000 {
+        // Very large files (50GB+): large batches for max parallelism
+        num_threads * 256
+    } else if chunk_count > 100_000 {
+        // Large files (5-50GB): large batches
+        num_threads * 256
+    } else if chunk_count > 10_000 {
+        // Medium files: reasonable batches
+        num_threads * 128
+    } else {
+        // Small files: still decent batch size
+        num_threads * 64
+    };
+    
+    debug!(batch_size, num_threads, chunk_count, "Batch configuration");
+    
+    // Shared counter for decompressed chunks (for progress reporting from decompression thread)
+    let decompressed_chunks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let decompressed_chunks_clone = decompressed_chunks.clone();
     
     // Create channel for pipeline: decompression -> hashing
-    // OPTIMIZATION: Increased buffer to 4 batches for maximum overlap
-    // This keeps decompression threads busy while hashing happens
-    let (tx, rx) = mpsc::sync_channel::<Result<(usize, Vec<Vec<u8>>), String>>(4);
+    // OPTIMIZATION: Larger buffer (16 batches) keeps decompression running while hashing catches up
+    // This allows decompression to stay far ahead of hashing, maximizing CPU utilization
+    let channel_depth = num_threads.max(16);
+    let (tx, rx) = mpsc::sync_channel::<Result<(usize, Vec<Vec<u8>>), String>>(channel_depth);
     
     // Configure rayon to use all cores aggressively
     rayon::ThreadPoolBuilder::new()
@@ -1308,19 +1313,25 @@ where
     
     // Spawn decompression thread pool
     let decompression_handle = thread::spawn(move || {
+        trace!("Decompression thread started");
         // Pre-create handle pool (one per thread)
         let handles_result: Result<Vec<E01Handle>, String> = (0..num_threads)
             .map(|_| E01Handle::open(&path_str))
             .collect();
         
         let mut handles = match handles_result {
-            Ok(h) => h,
+            Ok(h) => {
+                debug!(count = h.len(), "Opened E01 handles");
+                h
+            },
             Err(e) => {
+                debug!(error = %e, "Failed to open handles");
                 let _ = tx.send(Err(e));
                 return;
             }
         };
         
+        let mut batches_sent = 0;
         // Process batches and send to hashing thread
         for batch_start in (0..chunk_count).step_by(batch_size) {
             let batch_end = (batch_start + batch_size).min(chunk_count);
@@ -1338,7 +1349,11 @@ where
                     // Interleaved processing for better load balance
                     for chunk_idx in (batch_start + thread_id..batch_end).step_by(num_threads) {
                         match thread_handle.read_chunk_no_cache(chunk_idx) {
-                            Ok(chunk_data) => chunks.push((chunk_idx, chunk_data)),
+                            Ok(chunk_data) => {
+                                chunks.push((chunk_idx, chunk_data));
+                                // Update decompression progress counter
+                                decompressed_chunks_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            },
                             Err(e) => return Err(e),
                         }
                     }
@@ -1366,13 +1381,21 @@ where
             if tx.send(Ok((batch_start, batch_data))).is_err() {
                 return; // Hashing thread closed channel (error occurred)
             }
+            batches_sent += 1;
+            // Log decompression progress every 10 batches
+            if batches_sent % 10 == 0 {
+                let decompressed = decompressed_chunks_clone.load(std::sync::atomic::Ordering::Relaxed);
+                let percent = (decompressed as f64 / chunk_count as f64) * 100.0;
+                trace!(percent = format!("{:.1}", percent), decompressed, chunk_count, "Decompression progress");
+            }
         }
+        debug!(batches_sent, "Decompression complete");
     });
     
     // Hash on main thread - we MUST maintain sequential order for E01 compatibility
     // However, we can use SIMD and optimize the sequential path
     let is_known_algo = use_sha1 || use_sha256 || use_sha512 || use_blake3 || use_blake2 || use_xxh3 || use_xxh64 || use_crc32;
-    let mut md5_hasher = if !is_known_algo { Some(md5::Context::new()) } else { None };
+    let mut md5_hasher: Option<Md5> = if !is_known_algo { Some(Md5::new()) } else { None };
     let mut sha1_hasher = if use_sha1 { Some(Sha1::new()) } else { None };
     let mut sha256_hasher = if use_sha256 { Some(Sha256::new()) } else { None };
     let mut sha512_hasher = if use_sha512 { Some(Sha512::new()) } else { None };
@@ -1384,16 +1407,23 @@ where
     
     // Receive and hash batches as they arrive
     while let Ok(batch_result) = rx.recv() {
+        // Report progress based on decompression (which is ahead of hashing)
+        // This gives early feedback while decompression is happening
+        let decompressed = decompressed_chunks.load(std::sync::atomic::Ordering::Relaxed);
+        // Always report current decompression progress when we receive a batch
+        progress_callback(decompressed, chunk_count);
+        
         match batch_result {
             Ok((batch_start, batch_chunks)) => {
                 // Sequential hashing (required for E01 format compatibility)
                 // The hardware-accelerated SHA-NI makes this very fast already
                 for (relative_idx, chunk_data) in batch_chunks.iter().enumerate() {
-                    let chunk_idx = batch_start + relative_idx;
+                    let _chunk_idx = batch_start + relative_idx;
                     
                     // Update the appropriate hasher
+                    // BLAKE3 uses update_rayon for parallel internal hashing when data is large enough
                     if let Some(ref mut hasher) = md5_hasher {
-                        hasher.consume(chunk_data);
+                        Digest::update(hasher, chunk_data);
                     } else if let Some(ref mut hasher) = sha1_hasher {
                         hasher.update(chunk_data);
                     } else if let Some(ref mut hasher) = sha256_hasher {
@@ -1401,7 +1431,9 @@ where
                     } else if let Some(ref mut hasher) = sha512_hasher {
                         hasher.update(chunk_data);
                     } else if let Some(ref mut hasher) = blake3_hasher {
-                        hasher.update(chunk_data);
+                        // Use parallel hashing for BLAKE3 - it uses rayon internally
+                        // This is most effective for chunks >= 128KB
+                        hasher.update_rayon(chunk_data);
                     } else if let Some(ref mut hasher) = blake2_hasher {
                         hasher.update(chunk_data);
                     } else if let Some(ref mut hasher) = xxh3_hasher {
@@ -1412,11 +1444,8 @@ where
                         hasher.update(chunk_data);
                     }
                     
-                    // Report progress
-                    if chunk_idx >= last_reported + report_interval || chunk_idx == chunk_count - 1 {
-                        progress_callback(chunk_idx + 1, chunk_count);
-                        last_reported = chunk_idx;
-                    }
+                    // Progress is now reported via atomic counter + timer thread in lib.rs
+                    // The decompressed_chunks counter is updated by the decompression thread
                 }
             }
             Err(e) => {
@@ -1427,22 +1456,25 @@ where
         }
     }
     
+    // Final progress update
+    progress_callback(chunk_count, chunk_count);
+    
     // Wait for decompression thread to complete
     decompression_handle.join().map_err(|_| "Decompression thread panicked".to_string())?;
     
     // Return the hash result
     if let Some(hasher) = md5_hasher {
-        Ok(format!("{:x}", hasher.compute()))
+        Ok(hex::encode(hasher.finalize()))
     } else if let Some(hasher) = sha1_hasher {
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     } else if let Some(hasher) = sha256_hasher {
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     } else if let Some(hasher) = sha512_hasher {
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     } else if let Some(hasher) = blake3_hasher {
         Ok(format!("{}", hasher.finalize().to_hex()))
     } else if let Some(hasher) = blake2_hasher {
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     } else if let Some(hasher) = xxh3_hasher {
         Ok(format!("{:016x}", hasher.digest128()))
     } else if let Some(hasher) = xxh64_hasher {
