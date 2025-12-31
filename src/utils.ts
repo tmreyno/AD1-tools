@@ -32,6 +32,7 @@ export function typeIcon(type: string): string {
   if (t.includes("e01") || t.includes("encase")) return "💿";
   if (t.includes("l01")) return "📋";
   if (t.includes("raw") || t.includes("dd")) return "💾";
+  if (t.includes("ufed") || t.includes("ufd")) return "📱";
   if (t.includes("tar")) return "📚";
   if (t.includes("7z") || t.includes("7-zip")) return "📚";
   if (t.includes("zip")) return "🗜️";
@@ -49,6 +50,7 @@ export function typeClass(type: string): string {
   if (t.includes("e01") || t.includes("encase")) return "type-e01";
   if (t.includes("l01")) return "type-l01";
   if (t.includes("raw") || t.includes("dd")) return "type-raw";
+  if (t.includes("ufed") || t.includes("ufd")) return "type-ufed";
   if (t.includes("tar") || t.includes("7z") || t.includes("zip") || t.includes("rar") || t.includes("gz")) return "type-archive";
   return "type-other";
 }
@@ -73,4 +75,19 @@ export function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${mins}m ${secs.toFixed(0)}s`;
+}
+
+/**
+ * Create a debounced function that delays execution until after 
+ * `delay` milliseconds have elapsed since the last call.
+ */
+export function debounce<T extends (...args: Parameters<T>) => void>(
+  fn: T,
+  delay: number
+): (...args: Parameters<T>) => void {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Parameters<T>) => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), delay);
+  };
 }

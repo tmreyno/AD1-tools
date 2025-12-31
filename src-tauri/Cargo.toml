@@ -37,6 +37,7 @@ memmap2 = "0.9"  # Memory-mapped I/O for fast file hashing
 tracing = "0.1"  # Structured logging/tracing
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }  # Log subscriber with env filter
 sysinfo = "0.32"  # System info (CPU, memory usage)
+zip = { version = "2.2", default-features = false, features = ["deflate"] }  # ZIP archive reading for Cellebrite detection
 
 [features]
 default = []

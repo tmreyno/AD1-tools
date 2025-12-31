@@ -51,11 +51,32 @@ export type DiscoveredFile = {
 
 // --- Container Info Types ---
 
+export type Ad1VolumeInfo = {
+  volume_label?: string | null;
+  filesystem?: string | null;
+  os_info?: string | null;
+  block_size?: number | null;
+  volume_serial?: string | null;
+};
+
+export type Ad1CompanionLogInfo = {
+  case_number?: string | null;
+  evidence_number?: string | null;
+  examiner?: string | null;
+  notes?: string | null;
+  md5_hash?: string | null;
+  sha1_hash?: string | null;
+  acquisition_date?: string | null;
+};
+
 export type Ad1Info = {
   segment: SegmentHeader;
   logical: LogicalHeader;
   item_count: number;
   tree?: TreeEntry[];
+  segment_files?: string[];
+  volume?: Ad1VolumeInfo | null;
+  companion_log?: Ad1CompanionLogInfo | null;
 };
 
 export type E01Info = {
@@ -121,6 +142,81 @@ export type ArchiveInfo = {
   start_header_crc_valid?: boolean | null;
   /** Next Header CRC value */
   next_header_crc?: number | null;
+  /** Whether Cellebrite UFED files were detected inside the archive */
+  cellebrite_detected?: boolean;
+  /** List of Cellebrite files found (UFD, UFDR, UFDX) */
+  cellebrite_files?: string[];
+};
+
+// --- UFED (Cellebrite) Types ---
+
+export type UfedAssociatedFile = {
+  filename: string;
+  file_type: string;
+  size: number;
+  stored_hash?: string | null;
+};
+
+export type UfedCaseInfo = {
+  case_identifier?: string | null;
+  crime_type?: string | null;
+  department?: string | null;
+  device_name?: string | null;
+  examiner_name?: string | null;
+  location?: string | null;
+};
+
+export type UfedDeviceInfo = {
+  vendor?: string | null;
+  model?: string | null;
+  full_name?: string | null;
+  imei?: string | null;
+  imei2?: string | null;
+  iccid?: string | null;
+  os_version?: string | null;
+  serial_number?: string | null;
+};
+
+export type UfedExtractionInfo = {
+  acquisition_tool?: string | null;
+  tool_version?: string | null;
+  unit_id?: string | null;
+  extraction_type?: string | null;
+  connection_type?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  guid?: string | null;
+  machine_name?: string | null;
+};
+
+export type UfedStoredHash = {
+  filename: string;
+  algorithm: string;
+  hash: string;
+};
+
+export type UfedCollectionInfo = {
+  evidence_id?: string | null;
+  vendor?: string | null;
+  model?: string | null;
+  device_guid?: string | null;
+  extractions: string[];
+  ufdx_path: string;
+};
+
+export type UfedInfo = {
+  format: string;
+  size: number;
+  parent_folder?: string | null;
+  associated_files: UfedAssociatedFile[];
+  is_extraction_set: boolean;
+  device_hint?: string | null;
+  case_info?: UfedCaseInfo | null;
+  device_info?: UfedDeviceInfo | null;
+  extraction_info?: UfedExtractionInfo | null;
+  stored_hashes?: UfedStoredHash[] | null;
+  evidence_number?: string | null;
+  collection_info?: UfedCollectionInfo | null;
 };
 
 // --- Hash Types ---
@@ -193,6 +289,7 @@ export type ContainerInfo = {
   l01?: L01Info | null;
   raw?: RawInfo | null;
   archive?: ArchiveInfo | null;
+  ufed?: UfedInfo | null;
   note?: string | null;
   companion_log?: CompanionLogInfo | null;
 };
@@ -201,14 +298,22 @@ export type ContainerInfo = {
 
 export type HashAlgorithm = "md5" | "sha1" | "sha256" | "sha512" | "blake3" | "blake2" | "xxh3" | "xxh64" | "crc32";
 
-export const HASH_ALGORITHMS: { value: HashAlgorithm; label: string }[] = [
-  { value: "md5", label: "MD5" },
-  { value: "sha1", label: "SHA-1" },
-  { value: "sha256", label: "SHA-256" },
-  { value: "sha512", label: "SHA-512" },
-  { value: "blake3", label: "BLAKE3" },
-  { value: "blake2", label: "BLAKE2b" },
-  { value: "xxh3", label: "XXH3" },
-  { value: "xxh64", label: "XXH64" },
-  { value: "crc32", label: "CRC32" },
+export type HashAlgorithmInfo = { 
+  value: HashAlgorithm; 
+  label: string; 
+  speed: "fast" | "medium" | "slow";
+  forensic: boolean;  // Court-accepted for forensics
+  cryptographic: boolean;
+};
+
+export const HASH_ALGORITHMS: HashAlgorithmInfo[] = [
+  { value: "sha1", label: "SHA-1", speed: "medium", forensic: true, cryptographic: true },
+  { value: "sha256", label: "SHA-256", speed: "medium", forensic: true, cryptographic: true },
+  { value: "md5", label: "MD5", speed: "medium", forensic: true, cryptographic: false },
+  { value: "blake3", label: "BLAKE3 ⚡", speed: "fast", forensic: false, cryptographic: true },
+  { value: "sha512", label: "SHA-512", speed: "slow", forensic: true, cryptographic: true },
+  { value: "blake2", label: "BLAKE2b", speed: "fast", forensic: false, cryptographic: true },
+  { value: "xxh3", label: "XXH3 ⚡⚡", speed: "fast", forensic: false, cryptographic: false },
+  { value: "xxh64", label: "XXH64 ⚡⚡", speed: "fast", forensic: false, cryptographic: false },
+  { value: "crc32", label: "CRC32", speed: "fast", forensic: false, cryptographic: false },
 ];

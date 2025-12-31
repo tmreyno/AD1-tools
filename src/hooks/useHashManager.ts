@@ -1,0 +1,443 @@
+import { createSignal } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { DiscoveredFile, ContainerInfo, SegmentHashResult, HashHistoryEntry, HashAlgorithm, VerifyEntry, StoredHash } from "../types";
+import { normalizeError } from "../utils";
+import type { FileManager } from "./useFileManager";
+
+export interface FileHashInfo {
+  algorithm: string;
+  hash: string;
+  verified?: boolean | null;
+}
+
+export function useHashManager(fileManager: FileManager) {
+  const { 
+    discoveredFiles, 
+    selectedFiles, 
+    setSelectedFiles, 
+    fileInfoMap, 
+    setWorking, 
+    setOk, 
+    setError, 
+    updateFileStatus,
+    loadFileInfo,
+  } = fileManager;
+  
+  // Hash state
+  const [selectedHashAlgorithm, setSelectedHashAlgorithm] = createSignal<HashAlgorithm>("sha1");
+  const [fileHashMap, setFileHashMap] = createSignal<Map<string, FileHashInfo>>(new Map());
+  
+  // Segment verification state
+  const [segmentResults, setSegmentResults] = createSignal<Map<string, SegmentHashResult[]>>(new Map());
+  const [segmentVerifyProgress, setSegmentVerifyProgress] = createSignal<{ segment: string; percent: number; completed: number; total: number } | null>(null);
+  
+  // Hash history state (per file)
+  const [hashHistory, setHashHistory] = createSignal<Map<string, HashHistoryEntry[]>>(new Map());
+
+  // Add hash to history when computed
+  const recordHashToHistory = (file: DiscoveredFile, algorithm: string, hash: string, verified?: boolean, verifiedAgainst?: string) => {
+    const history = new Map(hashHistory());
+    const existingHistory = history.get(file.path) ?? [];
+    // Create new array to ensure reactivity (don't mutate existing)
+    const newEntry: HashHistoryEntry = {
+      algorithm,
+      hash,
+      timestamp: new Date(),
+      source: verified !== undefined ? "verified" : "computed",
+      verified,
+      verified_against: verifiedAgainst
+    };
+    history.set(file.path, [...existingHistory, newEntry]);
+    setHashHistory(history);
+  };
+
+  // Hash a single file
+  const hashSingleFile = async (file: DiscoveredFile) => {
+    const algorithm = selectedHashAlgorithm();
+    updateFileStatus(file.path, "hashing", 0);
+    const unlisten = await listen<{ percent: number }>("verify-progress", (e) => updateFileStatus(file.path, "hashing", e.payload.percent));
+    try {
+      let hash: string;
+      const ctype = file.container_type.toLowerCase();
+      if (ctype.includes("e01") || ctype.includes("encase") || ctype.includes("ex01")) {
+        hash = await invoke<string>("e01_v3_verify", { inputPath: file.path, algorithm });
+      } else if (ctype.includes("raw") || ctype.includes("dd")) {
+        hash = await invoke<string>("raw_verify", { inputPath: file.path, algorithm });
+      } else if (ctype.includes("ufed") || ctype.includes("zip") || ctype.includes("archive") || ctype.includes("tar") || ctype.includes("7z")) {
+        // UFED and archive containers - hash the file directly
+        hash = await invoke<string>("raw_verify", { inputPath: file.path, algorithm });
+      } else {
+        const r = await invoke<VerifyEntry[]>("logical_verify", { inputPath: file.path, algorithm });
+        hash = r.length > 0 && r[0].message ? r[0].message : "Complete";
+      }
+      
+      // Check if there's a stored hash to compare against
+      const info = fileInfoMap().get(file.path);
+      const storedHashes = [...(info?.e01?.stored_hashes ?? []), ...(info?.companion_log?.stored_hashes ?? [])];
+      // Also check UFED stored hashes (from .ufd file) - match by algorithm and filename
+      const fileName = file.path.split('/').pop() ?? '';
+      const ufedStoredHashes = info?.ufed?.stored_hashes ?? [];
+      const matchingUfedStored = ufedStoredHashes.find(sh => 
+        sh.algorithm.toLowerCase() === algorithm.toLowerCase() && 
+        sh.filename.toLowerCase() === fileName.toLowerCase()
+      );
+      const matchingStored = storedHashes.find(sh => sh.algorithm.toLowerCase() === algorithm.toLowerCase()) 
+        ?? (matchingUfedStored ? { algorithm: matchingUfedStored.algorithm, hash: matchingUfedStored.hash } : undefined);
+      
+      // Also check hash history for matching hash (self-verification)
+      const history = hashHistory().get(file.path) ?? [];
+      const matchingHistory = history.find(h => 
+        h.algorithm.toLowerCase() === algorithm.toLowerCase() && 
+        h.hash.toLowerCase() === hash.toLowerCase()
+      );
+      
+      // Verified if matches stored OR matches previous hash in history
+      const verified = matchingStored 
+        ? hash.toLowerCase() === matchingStored.hash.toLowerCase() 
+        : matchingHistory ? true : null;
+      const verifiedAgainst = matchingStored?.hash ?? matchingHistory?.hash;
+      
+      const m = new Map(fileHashMap());
+      m.set(file.path, { algorithm: algorithm.toUpperCase(), hash, verified });
+      setFileHashMap(m);
+      updateFileStatus(file.path, "hashed", 100);
+      
+      recordHashToHistory(file, algorithm.toUpperCase(), hash, verified ?? undefined, verifiedAgainst);
+      
+      return hash;
+    } catch (err) {
+      updateFileStatus(file.path, "error", 0, normalizeError(err));
+      throw err;
+    } finally {
+      unlisten();
+    }
+  };
+
+  // Hash selected files
+  const hashSelectedFiles = async () => {
+    const files = discoveredFiles().filter(f => selectedFiles().has(f.path));
+    if (!files.length) {
+      setError("No files selected");
+      return;
+    }
+    
+    const numCores = navigator.hardwareConcurrency || 4;
+    setWorking(`Loading file info for ${files.length} file(s)...`);
+    
+    // First, load file info for all files that don't have it yet
+    const filesToLoad = files.filter(f => !fileInfoMap().has(f.path));
+    for (const file of filesToLoad) {
+      try {
+        await loadFileInfo(file, false);
+      } catch { }
+    }
+    
+    setWorking(`# Hashing ${files.length} file(s) in parallel (${numCores} cores)...`);
+    
+    // Set all selected files to hashing status
+    files.forEach(f => updateFileStatus(f.path, "hashing", 0));
+    
+    // Track completed files for immediate UI updates
+    let completedCount = 0;
+    let verifiedCount = 0;
+    let failedCount = 0;
+    
+    // Listen for batch progress events
+    const unlisten = await listen<{ 
+      path: string; 
+      status: string; 
+      percent: number; 
+      files_completed: number; 
+      files_total: number;
+      chunks_processed?: number;
+      chunks_total?: number;
+      hash?: string;
+      algorithm?: string;
+      error?: string;
+    }>(
+      "batch-progress",
+      (e) => {
+        const { path, status, percent, files_completed, files_total, chunks_processed, chunks_total, hash, algorithm, error } = e.payload;
+        
+        if (status === "progress" || status === "started") {
+          updateFileStatus(path, "hashing", percent, undefined, chunks_processed, chunks_total);
+        } else if (status === "completed" && hash && algorithm) {
+          // Immediately update hash map and verify when a file completes
+          const file = files.find(f => f.path === path);
+          const info = fileInfoMap().get(path);
+          const storedHashes = [...(info?.e01?.stored_hashes ?? []), ...(info?.companion_log?.stored_hashes ?? [])];
+          // Also check UFED stored hashes (from .ufd file) - match by algorithm and filename
+          const fileName = path.split('/').pop() ?? '';
+          const ufedStoredHashes = info?.ufed?.stored_hashes ?? [];
+          const matchingUfedStored = ufedStoredHashes.find(sh => 
+            sh.algorithm.toLowerCase() === algorithm.toLowerCase() && 
+            sh.filename.toLowerCase() === fileName.toLowerCase()
+          );
+          const matchingStored = storedHashes.find(sh => sh.algorithm.toLowerCase() === algorithm.toLowerCase())
+            ?? (matchingUfedStored ? { algorithm: matchingUfedStored.algorithm, hash: matchingUfedStored.hash } : undefined);
+          
+          // Also check hash history for matching hash (self-verification)
+          const history = hashHistory().get(path) ?? [];
+          const matchingHistory = history.find(h => 
+            h.algorithm.toLowerCase() === algorithm.toLowerCase() && 
+            h.hash.toLowerCase() === hash.toLowerCase()
+          );
+          
+          // Verified if matches stored OR matches previous hash in history
+          const verified = matchingStored 
+            ? hash.toLowerCase() === matchingStored.hash.toLowerCase() 
+            : matchingHistory ? true : null;
+          const verifiedAgainst = matchingStored?.hash ?? matchingHistory?.hash;
+          
+          if (verified === true) verifiedCount++;
+          else if (verified === false) failedCount++;
+          completedCount++;
+          
+          // Update hash map immediately
+          const hashMap = new Map(fileHashMap());
+          hashMap.set(path, { algorithm, hash, verified });
+          setFileHashMap(hashMap);
+          
+          updateFileStatus(path, "hashed", 100);
+          
+          if (file) {
+            recordHashToHistory(file, algorithm, hash, verified ?? undefined, verifiedAgainst);
+          }
+        } else if (status === "error") {
+          updateFileStatus(path, "error", 0, error || "Unknown error");
+          completedCount++;
+        }
+        
+        // Show decompression progress in status if available
+        if (chunks_processed !== undefined && chunks_total !== undefined && chunks_total > 0) {
+          setWorking(`# ${files_completed}/${files_total} files | ${chunks_processed.toLocaleString()}/${chunks_total.toLocaleString()} chunks`);
+        } else {
+          setWorking(`# Hashing ${files_completed}/${files_total} files`);
+        }
+      }
+    );
+    
+    try {
+      // Wait for batch_hash to complete (results already processed via events)
+      await invoke<{ path: string; algorithm: string; hash?: string; error?: string }[]>(
+        "batch_hash",
+        { files: files.map(f => ({ path: f.path, container_type: f.container_type })), algorithm: selectedHashAlgorithm() }
+      );
+      
+      // Count results from current state (already updated via events)
+      const hashMap = fileHashMap();
+      let completed = 0;
+      let verifiedCountFinal = 0;
+      let failedCountFinal = 0;
+      let noStoredCount = 0;
+      
+      for (const file of files) {
+        const hash = hashMap.get(file.path);
+        if (hash) {
+          completed++;
+          if (hash.verified === true) verifiedCountFinal++;
+          else if (hash.verified === false) failedCountFinal++;
+          else noStoredCount++;
+        }
+      }
+      
+      let statusMsg = `Hashed ${completed}/${files.length} files`;
+      if (verifiedCountFinal > 0 || failedCountFinal > 0) {
+        const parts: string[] = [];
+        if (verifiedCountFinal > 0) parts.push(`✓ ${verifiedCountFinal} verified`);
+        if (failedCountFinal > 0) parts.push(`✗ ${failedCountFinal} FAILED`);
+        if (noStoredCount > 0) parts.push(`${noStoredCount} no stored hash`);
+        statusMsg += ` • ${parts.join(", ")}`;
+      }
+      
+      if (failedCountFinal > 0) {
+        setError(statusMsg);
+      } else {
+        setOk(statusMsg);
+      }
+    } catch (err) {
+      setError(normalizeError(err));
+      files.forEach(f => updateFileStatus(f.path, "error", 0, normalizeError(err)));
+    } finally {
+      unlisten();
+    }
+  };
+
+  // Hash all files
+  const hashAllFiles = async () => {
+    const files = discoveredFiles();
+    if (!files.length) {
+      setError("No files discovered");
+      return;
+    }
+    setSelectedFiles(new Set(files.map(f => f.path)));
+    await hashSelectedFiles();
+  };
+
+  // Verify individual segments
+  const verifySegments = async (file: DiscoveredFile) => {
+    const info = fileInfoMap().get(file.path);
+    const isE01 = file.container_type.toLowerCase().includes("e01") || file.container_type.toLowerCase().includes("encase");
+    
+    const expectedHashes = info?.companion_log?.segment_hashes ?? [];
+    const algorithm = expectedHashes.length > 0 ? expectedHashes[0].algorithm.toLowerCase() : selectedHashAlgorithm();
+    
+    setWorking(`Verifying segments with ${algorithm.toUpperCase()}...`);
+    updateFileStatus(file.path, "verifying-segments", 0);
+    setSegmentVerifyProgress({ segment: "", percent: 0, completed: 0, total: 0 });
+    
+    const unlisten = await listen<{ segment_name: string; segment_number: number; percent: number; segments_completed: number; segments_total: number }>(
+      "segment-verify-progress",
+      (e) => {
+        setSegmentVerifyProgress({
+          segment: e.payload.segment_name,
+          percent: e.payload.percent,
+          completed: e.payload.segments_completed,
+          total: e.payload.segments_total
+        });
+        setWorking(`Verifying segment ${e.payload.segment_name} (${e.payload.segments_completed}/${e.payload.segments_total})...`);
+      }
+    );
+    
+    try {
+      const command = isE01 ? "e01_verify_segments" : "raw_verify_segments";
+      const results = await invoke<SegmentHashResult[]>(command, {
+        inputPath: file.path,
+        algorithm,
+        expectedHashes
+      });
+      
+      const resultsMap = new Map(segmentResults());
+      resultsMap.set(file.path, results);
+      setSegmentResults(resultsMap);
+      
+      // Update hash history
+      const history = new Map(hashHistory());
+      const existingHistory = history.get(file.path) ?? [];
+      const timestamp = new Date();
+      
+      // Create new array with all segment entries (don't mutate existing)
+      const newEntries: HashHistoryEntry[] = results.map(seg => ({
+        algorithm: seg.algorithm,
+        hash: seg.computed_hash,
+        timestamp,
+        source: seg.expected_hash ? "verified" as const : "computed" as const,
+        verified: seg.verified,
+        verified_against: seg.expected_hash
+      }));
+      history.set(file.path, [...existingHistory, ...newEntries]);
+      setHashHistory(history);
+      
+      const verified = results.filter(r => r.verified === true).length;
+      const failed = results.filter(r => r.verified === false).length;
+      const noExpected = results.filter(r => r.verified === null || r.verified === undefined).length;
+      
+      updateFileStatus(file.path, "segments-verified", 100);
+      setSegmentVerifyProgress(null);
+      
+      if (failed > 0) {
+        setError(`⚠️ ${failed} segment(s) FAILED verification!`);
+      } else if (verified > 0) {
+        setOk(`✓ All ${verified} segments verified • ${noExpected > 0 ? `${noExpected} no expected hash` : ""}`);
+      } else {
+        setOk(`Computed ${results.length} segment hashes (no stored hashes to verify against)`);
+      }
+      
+    } catch (err) {
+      updateFileStatus(file.path, "error", 0, normalizeError(err));
+      setError(normalizeError(err));
+      setSegmentVerifyProgress(null);
+    } finally {
+      unlisten();
+    }
+  };
+
+  // Get all stored hashes sorted by source and timestamp
+  const getAllStoredHashesSorted = (info: ContainerInfo | undefined): StoredHash[] => {
+    if (!info) return [];
+    
+    const allHashes: StoredHash[] = [];
+    
+    // E01 container hashes
+    if (info.e01?.stored_hashes) {
+      const containerDate = info.e01.acquiry_date;
+      info.e01.stored_hashes.forEach(h => {
+        allHashes.push({
+          ...h,
+          timestamp: h.timestamp || containerDate || null,
+          source: h.source || 'container',
+        });
+      });
+    }
+    
+    // UFED container hashes
+    if (info.ufed?.stored_hashes) {
+      const containerDate = info.ufed.extraction_info?.start_time;
+      info.ufed.stored_hashes.forEach(h => {
+        allHashes.push({
+          algorithm: h.algorithm,
+          hash: h.hash,
+          timestamp: containerDate || null,
+          source: 'container',
+        });
+      });
+    }
+    
+    // Companion log hashes
+    if (info.companion_log?.stored_hashes) {
+      const logDate = info.companion_log.verification_finished || info.companion_log.acquisition_finished;
+      info.companion_log.stored_hashes.forEach(h => {
+        allHashes.push({
+          ...h,
+          timestamp: h.timestamp || logDate || null,
+          source: h.source || 'companion',
+        });
+      });
+    }
+    
+    return allHashes.sort((a, b) => {
+      if (a.source === 'container' && b.source !== 'container') return -1;
+      if (b.source === 'container' && a.source !== 'container') return 1;
+      if (a.algorithm !== b.algorithm) return a.algorithm.localeCompare(b.algorithm);
+      if (!a.timestamp && !b.timestamp) return 0;
+      if (!a.timestamp) return 1;
+      if (!b.timestamp) return -1;
+      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    });
+  };
+
+  // Format hash timestamp for display
+  const formatHashDate = (timestamp: string): string => {
+    try {
+      const d = new Date(timestamp);
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
+    } catch {
+      return timestamp;
+    }
+  };
+
+  return {
+    // State
+    selectedHashAlgorithm,
+    setSelectedHashAlgorithm,
+    fileHashMap,
+    setFileHashMap,
+    segmentResults,
+    segmentVerifyProgress,
+    hashHistory,
+    
+    // Actions
+    hashSingleFile,
+    hashSelectedFiles,
+    hashAllFiles,
+    verifySegments,
+    
+    // Helpers
+    getAllStoredHashesSorted,
+    formatHashDate,
+    recordHashToHistory,
+  };
+}
+
+export type HashManager = ReturnType<typeof useHashManager>;

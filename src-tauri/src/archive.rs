@@ -88,6 +88,10 @@ pub struct ArchiveInfo {
     pub start_header_crc_valid: Option<bool>,
     /// 7z-specific: Next Header CRC (for reference)
     pub next_header_crc: Option<u32>,
+    /// Cellebrite extraction detected (UFDR/UFDX/UFD)
+    pub cellebrite_detected: bool,
+    /// Cellebrite file paths found inside archive
+    pub cellebrite_files: Vec<String>,
 }
 
 // Magic bytes for various archive formats
@@ -280,12 +284,21 @@ pub fn info(path: &str) -> Result<ArchiveInfo, String> {
         encrypted_headers = true;
     }
     
+    // Detect Cellebrite UFDR/UFDX/UFD files inside the archive
+    let (cellebrite_detected, cellebrite_files) = match format {
+        ArchiveFormat::Zip | ArchiveFormat::Zip64 => {
+            detect_cellebrite_in_zip(path).unwrap_or((false, vec![]))
+        }
+        _ => (false, vec![]),
+    };
+    
     debug!(
         path = %path,
         format = %format_str,
         segment_count = segment_count,
         total_size = total_size,
         entry_count = ?entry_count,
+        cellebrite_detected = cellebrite_detected,
         "Archive info loaded"
     );
     
@@ -308,6 +321,8 @@ pub fn info(path: &str) -> Result<ArchiveInfo, String> {
         version,
         start_header_crc_valid,
         next_header_crc,
+        cellebrite_detected,
+        cellebrite_files,
     })
 }
 
@@ -409,6 +424,127 @@ fn check_zip_aes(file: &mut File, cd_offset: u64, cd_size: u32) -> Result<bool, 
     }
     
     Ok(false)
+}
+
+// =============================================================================
+// Cellebrite UFDR/UFDX/UFD Detection
+// =============================================================================
+
+/// Cellebrite file extensions to detect
+const CELLEBRITE_EXTENSIONS: &[&str] = &[".ufdr", ".ufdx", ".ufd"];
+
+/// Check if a filename is a Cellebrite extraction file
+fn is_cellebrite_file(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    CELLEBRITE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Detect Cellebrite UFDR/UFDX/UFD files inside a ZIP archive
+/// Also checks for nested ZIPs that might contain Cellebrite files
+/// 
+/// Returns: (detected, list of cellebrite file paths found)
+fn detect_cellebrite_in_zip(path: &str) -> Result<(bool, Vec<String>), String> {
+    let file = File::open(path)
+        .map_err(|e| format!("Failed to open ZIP: {e}"))?;
+    
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
+    
+    let mut cellebrite_files: Vec<String> = Vec::new();
+    let mut nested_zips: Vec<String> = Vec::new();
+    
+    // First pass: scan all entries in the archive
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            let name = entry.name().to_string();
+            let lower_name = name.to_lowercase();
+            
+            // Check for Cellebrite files
+            if is_cellebrite_file(&lower_name) {
+                debug!(path = %path, entry = %name, "Found Cellebrite file in ZIP");
+                cellebrite_files.push(name.clone());
+            }
+            
+            // Track nested ZIP files for deeper inspection
+            if lower_name.ends_with(".zip") {
+                nested_zips.push(name);
+            }
+        }
+    }
+    
+    // Second pass: check inside nested ZIPs (one level deep)
+    for nested_zip_name in &nested_zips {
+        if let Ok(nested_files) = scan_nested_zip_for_cellebrite(&mut archive, nested_zip_name) {
+            for nested_file in nested_files {
+                let full_path = format!("{}/{}", nested_zip_name, nested_file);
+                debug!(path = %path, entry = %full_path, "Found Cellebrite file in nested ZIP");
+                cellebrite_files.push(full_path);
+            }
+        }
+    }
+    
+    let detected = !cellebrite_files.is_empty();
+    
+    if detected {
+        debug!(
+            path = %path,
+            count = cellebrite_files.len(),
+            files = ?cellebrite_files,
+            "Cellebrite files detected"
+        );
+    }
+    
+    Ok((detected, cellebrite_files))
+}
+
+/// Scan a nested ZIP inside the parent archive for Cellebrite files
+fn scan_nested_zip_for_cellebrite(
+    parent_archive: &mut zip::ZipArchive<File>,
+    nested_zip_name: &str,
+) -> Result<Vec<String>, String> {
+    use std::io::{Cursor, Read};
+    
+    let mut cellebrite_files: Vec<String> = Vec::new();
+    
+    // Extract the nested ZIP to memory
+    let nested_data = {
+        let mut entry = parent_archive.by_name(nested_zip_name)
+            .map_err(|e| format!("Failed to read nested ZIP {}: {e}", nested_zip_name))?;
+        
+        // Limit nested ZIP size to prevent memory issues (100MB max)
+        let size = entry.size();
+        if size > 100 * 1024 * 1024 {
+            debug!(nested_zip = %nested_zip_name, size = size, "Nested ZIP too large, skipping");
+            return Ok(vec![]);
+        }
+        
+        let mut data = Vec::with_capacity(size as usize);
+        entry.read_to_end(&mut data)
+            .map_err(|e| format!("Failed to extract nested ZIP: {e}"))?;
+        data
+    };
+    
+    // Parse the nested ZIP
+    let cursor = Cursor::new(nested_data);
+    let mut nested_archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(e) => {
+            debug!(nested_zip = %nested_zip_name, error = %e, "Failed to parse nested ZIP");
+            return Ok(vec![]);
+        }
+    };
+    
+    // Scan nested archive entries
+    for i in 0..nested_archive.len() {
+        if let Ok(entry) = nested_archive.by_index(i) {
+            let name = entry.name().to_string();
+            if is_cellebrite_file(&name) {
+                cellebrite_files.push(name);
+            }
+        }
+    }
+    
+    Ok(cellebrite_files)
 }
 
 // =============================================================================

@@ -32,6 +32,7 @@
 //! │  Format Parsers                                             │
 //! │   ┌─────────┬─────────┬─────────┬─────────┬─────────┐      │
 //! │   │  ad1.rs │  ewf.rs │  l01.rs │  raw.rs │archive.rs│     │
+//! │   │  ufed.rs│         │         │         │         │      │
 //! │   └─────────┴─────────┴─────────┴─────────┴─────────┘      │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  Common Utilities (common/)                                 │
@@ -73,6 +74,7 @@ pub mod ewf;  // Expert Witness Format (E01/EWF/Ex01) parser
 mod l01;
 pub mod logging;  // Logging and tracing configuration
 pub mod raw;  // Raw disk images (.dd, .raw, .img, .001, etc.)
+pub mod ufed;  // Cellebrite UFED containers (UFD, UFDR, UFDX)
 mod containers;
 
 use tauri::Emitter;
@@ -584,6 +586,11 @@ struct BatchProgress {
     algorithm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    // Decompression progress (for E01/compressed containers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunks_processed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunks_total: Option<usize>,
 }
 
 /// Hash multiple files in parallel with smart scheduling
@@ -635,6 +642,8 @@ async fn batch_hash(
             hash: None,
             algorithm: None,
             error: None,
+            chunks_processed: None,
+            chunks_total: None,
         });
         
         let handle = tauri::async_runtime::spawn(async move {
@@ -653,6 +662,8 @@ async fn batch_hash(
                 hash: None,
                 algorithm: None,
                 error: None,
+                chunks_processed: None,
+                chunks_total: None,
             });
             
             let path_for_hash = path.clone();
@@ -688,7 +699,8 @@ async fn batch_hash(
                         let total = progress_total_clone.load(std::sync::atomic::Ordering::Relaxed);
                         if total > 1 {
                             let percent = ((current as f64 / total as f64) * 100.0) as u32;
-                            if percent != last_percent {
+                            // Only emit if percent increased (prevents bouncing)
+                            if percent > last_percent {
                                 let _ = app_for_timer.emit("batch-progress", BatchProgress {
                                     path: path_for_timer.clone(),
                                     status: "progress".to_string(),
@@ -698,6 +710,8 @@ async fn batch_hash(
                                     hash: None,
                                     algorithm: None,
                                     error: None,
+                                    chunks_processed: Some(current),
+                                    chunks_total: Some(total),
                                 });
                                 last_percent = percent;
                             }
@@ -712,6 +726,12 @@ async fn batch_hash(
                         progress_current.store(current, std::sync::atomic::Ordering::Relaxed);
                     })
                 } else if container_for_hash.contains("raw") || container_for_hash.contains("dd") {
+                    raw::verify_with_progress(&path_for_hash, &algo_for_hash, |current: u64, total: u64| {
+                        progress_total.store(total as usize, std::sync::atomic::Ordering::Relaxed);
+                        progress_current.store(current as usize, std::sync::atomic::Ordering::Relaxed);
+                    })
+                } else if container_for_hash.contains("ufed") || container_for_hash.contains("zip") || container_for_hash.contains("archive") || container_for_hash.contains("tar") || container_for_hash.contains("7z") {
+                    // UFED containers, archives (ZIP, TAR, 7z) - hash the file directly
                     raw::verify_with_progress(&path_for_hash, &algo_for_hash, |current: u64, total: u64| {
                         progress_total.store(total as usize, std::sync::atomic::Ordering::Relaxed);
                         progress_current.store(current as usize, std::sync::atomic::Ordering::Relaxed);
@@ -756,6 +776,8 @@ async fn batch_hash(
                         hash: Some(hash.clone()),
                         algorithm: Some(algo.to_uppercase()),
                         error: None,
+                        chunks_processed: None,
+                        chunks_total: None,
                     });
                     BatchHashResult {
                         path,
@@ -777,6 +799,8 @@ async fn batch_hash(
                         hash: None,
                         algorithm: None,
                         error: Some(e.clone()),
+                        chunks_processed: None,
+                        chunks_total: None,
                     });
                     BatchHashResult {
                         path,
