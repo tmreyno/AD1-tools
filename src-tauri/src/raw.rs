@@ -131,7 +131,9 @@ pub struct RawHandle {
 
 impl RawHandle {
     /// Open a raw image (single or multi-segment)
+    #[instrument(skip_all, fields(path))]
     pub fn open(path: &str) -> Result<Self, String> {
+        debug!(path, "Opening raw image handle");
         let path_obj = Path::new(path);
         if !path_obj.exists() {
             return Err(format!("File not found: {}", path));
@@ -139,6 +141,12 @@ impl RawHandle {
 
         let (segments, segment_sizes) = discover_segments(path)?;
         let total_size: u64 = segment_sizes.iter().sum();
+        
+        debug!(
+            segment_count = segments.len(),
+            total_size,
+            "Raw handle opened"
+        );
 
         Ok(RawHandle {
             segments,

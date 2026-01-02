@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use tracing::trace;
 
 // =============================================================================
 // Basic Read Functions (from current position)
@@ -65,6 +66,7 @@ pub fn read_u64_be(file: &mut File) -> Result<u64, String> {
 
 /// Read u8 at specific offset
 pub fn read_u8_at(file: &mut File, offset: u64) -> Result<u8, String> {
+    trace!(offset, "read_u8_at");
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Failed to seek to offset {}: {}", offset, e))?;
     read_u8(file)
@@ -72,6 +74,7 @@ pub fn read_u8_at(file: &mut File, offset: u64) -> Result<u8, String> {
 
 /// Read u16 little-endian at specific offset
 pub fn read_u16_at(file: &mut File, offset: u64) -> Result<u16, String> {
+    trace!(offset, "read_u16_at");
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Failed to seek to offset {}: {}", offset, e))?;
     read_u16_le(file)
@@ -79,6 +82,7 @@ pub fn read_u16_at(file: &mut File, offset: u64) -> Result<u16, String> {
 
 /// Read u32 little-endian at specific offset
 pub fn read_u32_at(file: &mut File, offset: u64) -> Result<u32, String> {
+    trace!(offset, "read_u32_at");
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Failed to seek to offset {}: {}", offset, e))?;
     read_u32_le(file)
@@ -86,6 +90,7 @@ pub fn read_u32_at(file: &mut File, offset: u64) -> Result<u32, String> {
 
 /// Read u64 little-endian at specific offset
 pub fn read_u64_at(file: &mut File, offset: u64) -> Result<u64, String> {
+    trace!(offset, "read_u64_at");
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Failed to seek to offset {}: {}", offset, e))?;
     read_u64_le(file)

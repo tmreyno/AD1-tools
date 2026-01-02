@@ -20,6 +20,7 @@ type StatusState = {
 };
 
 type VerifyProgress = {
+  path: string;
   current: number;
   total: number;
   percent: number;

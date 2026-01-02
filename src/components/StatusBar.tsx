@@ -38,37 +38,46 @@ export function StatusBar(props: StatusBarProps) {
     const parts = cleanedMsg.split(/(#)/g);
     return parts.map((part) => {
       if (part === "#") {
-        return <span class="status-icon-spin">#</span>;
+        return <span class="inline-block text-base font-black animate-spin-slow">#</span>;
       }
       return part;
     });
   };
 
+  const statusBg = () => {
+    switch (props.statusKind) {
+      case "idle": return "bg-bg-card text-txt-muted";
+      case "working": return "bg-warning-soft text-warning";
+      case "ok": return "bg-success-soft text-success";
+      case "error": return "bg-error-soft text-error";
+    }
+  };
+
   return (
-    <footer class="status-bar">
-      <div class={`status-message-row ${props.statusKind}`}>
-        <span class="status-icon">{statusIcon()}</span>
-        <span class="status-text">{renderStatusMessage()}</span>
+    <footer class="flex flex-col bg-bg-panel border-t border-border shrink-0">
+      <div class={`flex items-center gap-2 px-4 py-1.5 text-sm ${statusBg()}`}>
+        <span class={`text-sm shrink-0 ${props.statusKind === 'working' ? 'animate-pulse-slow' : ''}`}>{statusIcon()}</span>
+        <span class="font-medium truncate flex items-center gap-0.5">{renderStatusMessage()}</span>
         
-        <div class="status-stats">
+        <div class="flex items-center gap-1.5 text-xs opacity-80">
           <Show when={props.discoveredCount > 0}>
-            <span class="stat-item">📁 {props.discoveredCount}</span>
-            <span class="stat-item">💾 {formatBytes(props.totalSize)}</span>
+            <span>📁 {props.discoveredCount}</span>
+            <span>💾 {formatBytes(props.totalSize)}</span>
           </Show>
           <Show when={props.selectedCount > 0}>
-            <span class="stat-item">☑ {props.selectedCount}</span>
+            <span>☑ {props.selectedCount}</span>
           </Show>
         </div>
         
-        <div class="system-stats">
+        <div class="flex items-center gap-2 ml-auto text-xs font-mono pl-3 border-l border-white/15 opacity-85">
           <Show when={props.systemStats}>
-            <span class="stat-item" title={`App CPU: ${props.systemStats!.app_cpu_usage.toFixed(1)}% (${(props.systemStats!.app_cpu_usage / 100).toFixed(1)} cores)\nSystem CPU: ${props.systemStats!.cpu_usage.toFixed(1)}%\nCores: ${props.systemStats!.cpu_cores}`}>
+            <span title={`App CPU: ${props.systemStats!.app_cpu_usage.toFixed(1)}% (${(props.systemStats!.app_cpu_usage / 100).toFixed(1)} cores)\nSystem CPU: ${props.systemStats!.cpu_usage.toFixed(1)}%\nCores: ${props.systemStats!.cpu_cores}`}>
               🔥 {formatCpuUsage(props.systemStats!.app_cpu_usage, props.systemStats!.cpu_cores)}
             </span>
-            <span class="stat-item" title={`App Memory: ${formatBytes(props.systemStats!.app_memory)}\nSystem: ${formatBytes(props.systemStats!.memory_used)} / ${formatBytes(props.systemStats!.memory_total)} (${props.systemStats!.memory_percent.toFixed(1)}%)`}>
+            <span title={`App Memory: ${formatBytes(props.systemStats!.app_memory)}\nSystem: ${formatBytes(props.systemStats!.memory_used)} / ${formatBytes(props.systemStats!.memory_total)} (${props.systemStats!.memory_percent.toFixed(1)}%)`}>
               🧠 {formatBytes(props.systemStats!.app_memory)}
             </span>
-            <span class="stat-item" title={`App threads: ${props.systemStats!.app_threads}`}>
+            <span title={`Worker threads: ${props.systemStats!.app_threads}`}>
               🧵 {props.systemStats!.app_threads}
             </span>
           </Show>

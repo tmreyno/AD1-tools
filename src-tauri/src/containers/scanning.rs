@@ -187,6 +187,20 @@ where
                 let metadata = entry.metadata().ok();
                 let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 
+                // Extract timestamps from metadata
+                let created = metadata.as_ref()
+                    .and_then(|m| m.created().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Local> = t.into();
+                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    });
+                let modified = metadata.as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Local> = t.into();
+                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    });
+                
                 // FAST PATH: Skip segment calculation during scan - it's slow on external drives
                 // Segment details will be calculated on-demand when user selects a file
                 
@@ -199,8 +213,8 @@ where
                     segment_files: None,
                     segment_sizes: None,
                     total_segment_size: None,
-                    created: None,
-                    modified: None,
+                    created,
+                    modified,
                 };
                 
                 on_file_found(&file);
@@ -371,7 +385,20 @@ fn scan_dir_internal(
                 let metadata = entry.metadata().ok();
                 let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 
-                // FAST PATH: Skip timestamps and segment calculation during scan
+                // Extract timestamps from metadata
+                let created = metadata.as_ref()
+                    .and_then(|m| m.created().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Local> = t.into();
+                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    });
+                let modified = metadata.as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Local> = t.into();
+                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                    });
+                
                 discovered.push(DiscoveredFile {
                     path: display_path,
                     filename: display_filename,
@@ -381,8 +408,8 @@ fn scan_dir_internal(
                     segment_files: None,
                     segment_sizes: None,
                     total_segment_size: None,
-                    created: None,
-                    modified: None,
+                    created,
+                    modified,
                 });
             } else {
                 debug!("Skipping duplicate basename: {}", filename);
@@ -398,13 +425,28 @@ fn scan_dir_internal(
 /// Detect container type by file extension only (fast, no file I/O)
 /// Returns None for unrecognized extensions
 fn detect_container_type_by_extension(lower: &str) -> Option<&'static str> {
+    // =========================================================================
+    // Forensic Containers (evidence preservation formats)
+    // =========================================================================
     if lower.ends_with(".ad1") {
         Some("AD1")
     } else if lower.ends_with(".l01") {
         Some("L01")
     } else if lower.ends_with(".lx01") {
         Some("Lx01")
-    // Cellebrite UFED formats
+    } else if lower.ends_with(".e01") {
+        Some("EnCase (E01)")
+    } else if lower.ends_with(".ex01") {
+        Some("EnCase (Ex01)")
+    } else if lower.ends_with(".aff") || lower.ends_with(".afd") {
+        Some("AFF")
+    } else if lower.ends_with(".aff4") {
+        Some("AFF4")
+    } else if lower.ends_with(".s01") || lower.ends_with(".s02") {
+        Some("SMART")
+    // =========================================================================
+    // UFED Mobile Forensics
+    // =========================================================================
     } else if lower.ends_with(".ufdr") {
         Some("UFED (UFDR)")
     } else if lower.ends_with(".ufdx") {
@@ -413,19 +455,9 @@ fn detect_container_type_by_extension(lower: &str) -> Option<&'static str> {
         None
     } else if lower.ends_with(".ufd") {
         Some("UFED (UFD)")
-    } else if lower.ends_with(".tar") {
-        if lower.contains("logical") {
-            Some("TAR (Logical)")
-        } else {
-            Some("TAR")
-        }
-    } else if lower.ends_with(".e01") {
-        Some("EnCase (E01)")
-    } else if lower.ends_with(".ex01") {
-        Some("EnCase (Ex01)")
-    } else if lower.ends_with(".aff") || lower.ends_with(".afd") {
-        Some("AFF")
-    // Archive formats - check before raw to catch .7z.001 properly
+    // =========================================================================
+    // Compression Archives
+    // =========================================================================
     } else if lower.ends_with(".7z") || lower.ends_with(".7z.001") {
         Some("7-Zip")
     } else if lower.ends_with(".zip") || lower.ends_with(".zip.001") || lower.ends_with(".z01") {
@@ -434,8 +466,60 @@ fn detect_container_type_by_extension(lower: &str) -> Option<&'static str> {
         Some("RAR")
     } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         Some("TAR.GZ")
+    } else if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        Some("TAR.XZ")
+    } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
+        Some("TAR.BZ2")
+    } else if lower.ends_with(".tar.zst") {
+        Some("TAR.ZSTD")
+    } else if lower.ends_with(".tar.lz4") {
+        Some("TAR.LZ4")
+    } else if lower.ends_with(".tar") {
+        if lower.contains("logical") {
+            Some("TAR (Logical)")
+        } else {
+            Some("TAR")
+        }
     } else if lower.ends_with(".gz") && !lower.ends_with(".tar.gz") {
         Some("GZIP")
+    } else if lower.ends_with(".xz") && !lower.ends_with(".tar.xz") {
+        Some("XZ")
+    } else if lower.ends_with(".bz2") && !lower.ends_with(".tar.bz2") {
+        Some("BZIP2")
+    } else if lower.ends_with(".zst") || lower.ends_with(".zstd") {
+        Some("ZSTD")
+    } else if lower.ends_with(".lz4") && !lower.ends_with(".tar.lz4") {
+        Some("LZ4")
+    // =========================================================================
+    // Virtual Machine Disk Images
+    // =========================================================================
+    } else if lower.ends_with(".vmdk") {
+        Some("VMDK")
+    } else if lower.ends_with(".vhd") {
+        Some("VHD")
+    } else if lower.ends_with(".vhdx") {
+        Some("VHDX")
+    } else if lower.ends_with(".qcow2") || lower.ends_with(".qcow") {
+        Some("QCOW2")
+    } else if lower.ends_with(".vdi") {
+        Some("VDI")
+    // =========================================================================
+    // macOS Disk Images
+    // =========================================================================
+    } else if lower.ends_with(".dmg") {
+        Some("DMG")
+    } else if lower.ends_with(".sparsebundle") || lower.ends_with(".sparseimage") {
+        Some("Apple Sparse Image")
+    // =========================================================================
+    // Optical Disc Images
+    // =========================================================================
+    } else if lower.ends_with(".iso") {
+        Some("ISO 9660")
+    } else if lower.ends_with(".bin") || lower.ends_with(".cue") {
+        Some("BIN/CUE")
+    // =========================================================================
+    // Raw Disk Images
+    // =========================================================================
     } else if is_numbered_segment(lower) && !is_archive_segment(lower) {
         // Raw image segments (.001, .002, etc.) - but not archive segments
         Some("Raw Image")

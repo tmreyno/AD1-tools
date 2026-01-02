@@ -75,11 +75,18 @@ export type Ad1Info = {
   item_count: number;
   tree?: TreeEntry[];
   segment_files?: string[];
+  /** Size of each segment file in bytes */
+  segment_sizes?: number[];
+  /** Total size of all segment files combined */
+  total_size?: number;
+  /** Missing segment files (incomplete container) */
+  missing_segments?: string[];
   volume?: Ad1VolumeInfo | null;
   companion_log?: Ad1CompanionLogInfo | null;
 };
 
-export type E01Info = {
+/** EWF container info (E01/L01/Ex01/Lx01 formats) */
+export type EwfInfo = {
   format_version: string;
   segment_count: number;
   sector_count: number;
@@ -100,14 +107,11 @@ export type E01Info = {
   stored_hashes?: StoredHash[];
 };
 
-export type L01Info = {
-  format_version: number;
-  case_info: string;
-  examiner?: string;
-  description?: string;
-  file_count: number;
-  total_size: number;
-};
+/** @deprecated Use EwfInfo instead - L01 uses the same EWF format */
+export type L01Info = EwfInfo;
+
+/** @deprecated Use EwfInfo instead */
+export type E01Info = EwfInfo;
 
 export type RawInfo = {
   segment_count: number;
@@ -227,6 +231,8 @@ export type StoredHash = {
   verified?: boolean | null;
   timestamp?: string | null;
   source?: string | null;
+  /** Filename this hash belongs to (for UFED which has per-file hashes) */
+  filename?: string | null;
 };
 
 export type SegmentHash = {
@@ -285,8 +291,10 @@ export type CompanionLogInfo = {
 export type ContainerInfo = {
   container: string;
   ad1?: Ad1Info | null;
-  e01?: E01Info | null;
-  l01?: L01Info | null;
+  /** EWF physical image (E01/Ex01) */
+  e01?: EwfInfo | null;
+  /** EWF logical evidence (L01/Lx01) */
+  l01?: EwfInfo | null;
   raw?: RawInfo | null;
   archive?: ArchiveInfo | null;
   ufed?: UfedInfo | null;
@@ -317,3 +325,146 @@ export const HASH_ALGORITHMS: HashAlgorithmInfo[] = [
   { value: "xxh64", label: "XXH64 ⚡⚡", speed: "fast", forensic: false, cryptographic: false },
   { value: "crc32", label: "CRC32", speed: "fast", forensic: false, cryptographic: false },
 ];
+
+// --- Database Persistence Types ---
+
+/** A session represents an open directory/workspace */
+export type DbSession = {
+  id: string;
+  name: string;
+  root_path: string;
+  created_at: string;
+  last_opened_at: string;
+};
+
+/** A file record in the database */
+export type DbFileRecord = {
+  id: string;
+  session_id: string;
+  path: string;
+  filename: string;
+  container_type: string;
+  total_size: number;
+  segment_count: number;
+  discovered_at: string;
+};
+
+/** A hash record - immutable audit trail */
+export type DbHashRecord = {
+  id: string;
+  file_id: string;
+  algorithm: string;
+  hash_value: string;
+  computed_at: string;
+  segment_index?: number | null;
+  segment_name?: string | null;
+  source: "computed" | "stored" | "imported";
+};
+
+/** A verification record */
+export type DbVerificationRecord = {
+  id: string;
+  hash_id: string;
+  verified_at: string;
+  result: "match" | "mismatch";
+  expected_hash: string;
+  actual_hash: string;
+};
+
+/** An open tab record for UI state */
+export type DbOpenTabRecord = {
+  id: string;
+  session_id: string;
+  file_path: string;
+  tab_order: number;
+  is_active: boolean;
+};
+
+// --- Project File Types ---
+
+/** Project file format version for future compatibility */
+export const PROJECT_FILE_VERSION = 1;
+
+/** File extension for FFX project files */
+export const PROJECT_FILE_EXTENSION = ".ffxproj";
+
+/** A saved project file structure */
+export type FFXProject = {
+  /** Project file format version */
+  version: number;
+  /** Project name (derived from directory name) */
+  name: string;
+  /** Root directory path that was opened */
+  root_path: string;
+  /** When the project was created */
+  created_at: string;
+  /** When the project was last saved */
+  saved_at: string;
+  /** Application version that created/saved this project */
+  app_version: string;
+  /** Open tabs state */
+  tabs: ProjectTab[];
+  /** Active tab file path (if any) */
+  active_tab_path: string | null;
+  /** Hash computation history */
+  hash_history: ProjectHashHistory;
+  /** UI state preferences */
+  ui_state: ProjectUIState;
+  /** User notes/annotations (future feature) */
+  notes?: string;
+  /** Custom tags/labels (future feature) */
+  tags?: string[];
+};
+
+/** A tab in the saved project */
+export type ProjectTab = {
+  /** File path relative to root_path */
+  file_path: string;
+  /** Tab order (0-based) */
+  order: number;
+};
+
+/** Hash history for the project */
+export type ProjectHashHistory = {
+  /** Map of file path to hash records */
+  files: Record<string, ProjectFileHashes>;
+};
+
+/** Hash records for a single file */
+export type ProjectFileHashes = {
+  /** Algorithm used */
+  algorithm: string;
+  /** Computed hash value */
+  hash_value: string;
+  /** When computed */
+  computed_at: string;
+  /** Verification status if verified */
+  verified?: {
+    result: "match" | "mismatch";
+    verified_at: string;
+  };
+}[];
+
+/** UI state to restore */
+export type ProjectUIState = {
+  /** Panel sizes (if adjustable) */
+  panel_sizes?: number[];
+  /** Expanded tree nodes */
+  expanded_paths?: string[];
+  /** Scroll positions */
+  scroll_positions?: Record<string, number>;
+};
+
+/** Result of loading a project */
+export type ProjectLoadResult = {
+  success: boolean;
+  project?: FFXProject;
+  error?: string;
+};
+
+/** Result of saving a project */
+export type ProjectSaveResult = {
+  success: boolean;
+  path?: string;
+  error?: string;
+};

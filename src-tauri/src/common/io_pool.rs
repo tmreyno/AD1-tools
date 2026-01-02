@@ -6,6 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::path::PathBuf;
+use tracing::{debug, trace};
 
 /// Default maximum number of simultaneously open file handles
 pub const DEFAULT_MAX_OPEN_FILES: usize = 32;
@@ -59,6 +60,7 @@ impl FileIoPool {
             self.lru_queue.retain(|&x| x != file_index);
             // Add to front
             self.lru_queue.push_front(file_index);
+            trace!(file_index, "File handle cache hit");
             return Ok(self.open_handles.get_mut(&file_index).unwrap());
         }
 
@@ -66,12 +68,14 @@ impl FileIoPool {
         if self.open_handles.len() >= self.max_open {
             // Close least recently used file
             if let Some(lru_index) = self.lru_queue.pop_back() {
+                trace!(lru_index, "Evicting LRU file handle");
                 self.open_handles.remove(&lru_index);
             }
         }
 
         // Open the new file
         let file_path = &self.file_paths[file_index];
+        debug!(file_index, ?file_path, "Opening file handle");
         let file = File::open(file_path)
             .map_err(|e| format!("Failed to open segment {}: {}", file_index, e))?;
 

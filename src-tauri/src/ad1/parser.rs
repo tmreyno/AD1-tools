@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::trace;
+use tracing::{trace, debug, instrument};
 
 use super::types::*;
 use super::utils::*;
@@ -34,18 +34,26 @@ pub(crate) struct Session {
 
 impl Session {
     /// Open an AD1 container and parse its structure
+    #[instrument(skip_all, fields(path))]
     pub fn open(path: &str) -> Result<Self, String> {
-        trace!(path, "Opening AD1 session");
+        debug!(path, "Opening AD1 session");
         validate_input(path)?;
         let mut header_file = File::open(path)
             .map_err(|e| format!("Failed to open AD1 file '{path}': {e}"))?;
         let segment_header = read_segment_header(&mut header_file)?;
         let logical_header = read_logical_header(&mut header_file)?;
+        
+        debug!(
+            segment_count = segment_header.segment_number,
+            first_item_addr = logical_header.first_item_addr,
+            "AD1 headers parsed"
+        );
 
         let mut files = Vec::new();
         let mut file_sizes = Vec::new();
         for index in 1..=segment_header.segment_number {
             let segment_path = build_segment_path(path, index);
+            trace!(index, segment_path, "Opening segment");
             let mut file = File::open(&segment_path)
                 .map_err(|e| format!("Failed to open segment '{segment_path}': {e}"))?;
             let size = file
@@ -70,6 +78,7 @@ impl Session {
         };
 
         let root_items = session.read_item_chain(session.logical_header.first_item_addr)?;
+        debug!(root_item_count = root_items.len(), "Parsed root items");
         session.root_items = root_items;
 
         Ok(session)
@@ -391,16 +400,36 @@ impl Session {
             let data = self.read_file_data(item)?;
             let computed = compute_hash(&data, algorithm);
             
-            let status = match stored {
+            let (status, stored_for_output) = match &stored {
                 Some(stored_hash) => {
-                    if stored_hash == computed { "ok" } else { "nok" }
+                    // Compare hashes case-insensitively (both should be lowercase, but be safe)
+                    let matches = stored_hash.eq_ignore_ascii_case(&computed);
+                    if matches {
+                        ("ok", Some(stored_hash.clone()))
+                    } else {
+                        debug!(
+                            path = %path,
+                            stored = %stored_hash,
+                            computed = %computed,
+                            size = item.decompressed_size,
+                            "Hash mismatch"
+                        );
+                        ("nok", Some(stored_hash.clone()))
+                    }
                 }
-                None => "computed",
+                None => {
+                    trace!(path = %path, "No stored hash, computed only");
+                    ("computed", None)
+                }
             };
 
             out.push(VerifyEntry {
                 path: path.clone(),
                 status: status.to_string(),
+                algorithm: Some(algorithm.name().to_string()),
+                computed: Some(computed),
+                stored: stored_for_output,
+                size: Some(item.decompressed_size),
             });
             
             *current += 1;

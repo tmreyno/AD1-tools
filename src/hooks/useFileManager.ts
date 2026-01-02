@@ -59,6 +59,11 @@ export function useFileManager() {
   // System stats
   const [systemStats, setSystemStats] = createSignal<SystemStats | null>(null);
   
+  // Loading progress state
+  const [loadProgress, setLoadProgress] = createSignal<{ show: boolean; title: string; message: string; current: number; total: number; cancelled: boolean }>({
+    show: false, title: "", message: "", current: 0, total: 0, cancelled: false
+  });
+  
   // Setup system stats listener
   const setupSystemStatsListener = async () => {
     try {
@@ -256,7 +261,8 @@ export function useFileManager() {
     try {
       const count = await invoke<number>("scan_directory_streaming", { dirPath: targetDir, recursive: recursiveScan() });
       setOk(`Found ${count} evidence file(s) • ${formatBytes(discoveredFiles().reduce((s, f) => s + f.size, 0))}`);
-      loadInfoInBackground();
+      // Auto-load only stored hashes (fast info) after scan
+      loadStoredHashesInBackground();
     } catch (err) {
       setError(normalizeError(err));
     } finally {
@@ -264,16 +270,29 @@ export function useFileManager() {
     }
   };
   
-  // Load file info in background
-  const loadInfoInBackground = async () => {
+  // Load only stored hashes in background (fast - no heavy parsing)
+  const loadStoredHashesInBackground = async () => {
     const files = discoveredFiles();
     if (files.length === 0) return;
     
     let loaded = 0;
     const total = files.length;
     
+    setLoadProgress({ show: true, title: "Loading Stored Hashes", message: "Reading container headers...", current: 0, total, cancelled: false });
+    
     for (const file of files) {
-      if (fileInfoMap().has(file.path)) continue;
+      // Check for cancellation
+      if (loadProgress().cancelled) {
+        setLoadProgress(prev => ({ ...prev, show: false }));
+        setOk(`Cancelled • Loaded ${loaded}/${total} files`);
+        return;
+      }
+      
+      if (fileInfoMap().has(file.path)) {
+        loaded++;
+        setLoadProgress(prev => ({ ...prev, current: loaded, message: `${file.filename}` }));
+        continue;
+      }
       
       try {
         const result = await invoke<ContainerInfo>("logical_info_fast", { inputPath: file.path });
@@ -283,15 +302,21 @@ export function useFileManager() {
           return m;
         });
         loaded++;
-        setStatusMessage(`Found ${total} file(s) • Loading info: ${loaded}/${total}`);
-      } catch {
-        // Silently skip
+        setLoadProgress(prev => ({ ...prev, current: loaded, message: `${file.filename}` }));
+      } catch (err) {
+        console.warn(`Failed to load info for ${file.filename}:`, err);
+        loaded++;
+        setLoadProgress(prev => ({ ...prev, current: loaded }));
       }
     }
     
-    if (loaded > 0) {
-      setOk(`Found ${total} file(s) • Info loaded for ${loaded}`);
-    }
+    setLoadProgress(prev => ({ ...prev, show: false }));
+    setOk(`Found ${total} file(s) • Stored hashes loaded`);
+  };
+  
+  // Cancel loading
+  const cancelLoading = () => {
+    setLoadProgress(prev => ({ ...prev, cancelled: true }));
   };
 
   // Load file info for a single file
@@ -314,24 +339,43 @@ export function useFileManager() {
     }
   };
 
-  // Load all file info
+  // Load all file info (full details with progress modal)
   const loadAllInfo = async () => {
-    setWorking(`Loading info for ${discoveredFiles().length} files...`);
+    const files = discoveredFiles();
+    if (files.length === 0) return;
+    
+    const total = files.length;
     let loaded = 0;
-    for (const file of discoveredFiles()) {
+    
+    setLoadProgress({ show: true, title: "Loading Full Details", message: "Parsing container metadata...", current: 0, total, cancelled: false });
+    
+    for (const file of files) {
+      // Check for cancellation
+      if (loadProgress().cancelled) {
+        setLoadProgress(prev => ({ ...prev, show: false }));
+        setOk(`Cancelled • Loaded ${loaded}/${total} files`);
+        return;
+      }
+      
+      setLoadProgress(prev => ({ ...prev, current: loaded, message: `${file.filename}` }));
+      
       if (!fileInfoMap().has(file.path)) {
         try {
-          const result = await invoke<ContainerInfo>("logical_info_fast", { inputPath: file.path });
+          const result = await invoke<ContainerInfo>("logical_info", { inputPath: file.path, includeTree: false });
           setFileInfoMap(prev => {
             const m = new Map(prev);
             m.set(file.path, result);
             return m;
           });
-          loaded++;
-        } catch { }
+        } catch (err) {
+          console.warn(`Failed to load info for ${file.filename}:`, err);
+        }
       }
+      loaded++;
     }
-    setOk(`Loaded info for ${loaded} files`);
+    
+    setLoadProgress(prev => ({ ...prev, show: false }));
+    setOk(`Loaded full details for ${loaded} files`);
   };
 
   // Select and view file
@@ -340,7 +384,10 @@ export function useFileManager() {
     if (!fileInfoMap().has(file.path)) {
       try {
         await loadFileInfo(file, true);
-      } catch { }
+      } catch (err) {
+        // Log but don't propagate - file may have missing segments
+        console.warn(`Failed to load info for ${file.filename}:`, normalizeError(err));
+      }
     } else {
       const info = fileInfoMap().get(file.path);
       if (info?.ad1?.tree) setTree(info.ad1.tree);
@@ -374,6 +421,7 @@ export function useFileManager() {
     statusMessage,
     statusKind,
     systemStats,
+    loadProgress,
     
     // Computed
     filteredFiles,
@@ -398,6 +446,7 @@ export function useFileManager() {
     loadAllInfo,
     selectAndViewFile,
     setupSystemStatsListener,
+    cancelLoading,
   };
 }
 

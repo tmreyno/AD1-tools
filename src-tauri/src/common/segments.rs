@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
+use tracing::{debug, trace};
 
 // =============================================================================
 // Numbered Segment Discovery (.001, .002, etc.)
@@ -16,6 +17,7 @@ use std::fs;
 /// 
 /// Returns (paths, sizes) sorted by segment number
 pub fn discover_numbered_segments(path: &str) -> Result<(Vec<PathBuf>, Vec<u64>), String> {
+    debug!(path, "Discovering numbered segments");
     let path_obj = Path::new(path);
     let parent = path_obj.parent().unwrap_or(Path::new("."));
     let filename = path_obj.file_name()
@@ -30,6 +32,7 @@ pub fn discover_numbered_segments(path: &str) -> Result<(Vec<PathBuf>, Vec<u64>)
         if ext.len() == 3 && ext.chars().all(|c| c.is_ascii_digit()) {
             // Multi-segment numbered format
             let base = &filename[..filename.len() - 4]; // Remove .XXX
+            trace!(base, "Detected numbered segment format");
             return discover_numbered_segments_by_base(parent, base);
         }
     }
@@ -39,20 +42,24 @@ pub fn discover_numbered_segments(path: &str) -> Result<(Vec<PathBuf>, Vec<u64>)
         .map_err(|e| format!("Failed to get file size: {}", e))?
         .len();
     
+    debug!(path, size, "Single file (non-segmented)");
     Ok((vec![path_obj.to_path_buf()], vec![size]))
 }
 
 /// Discover numbered segments by base name
 fn discover_numbered_segments_by_base(dir: &Path, base: &str) -> Result<(Vec<PathBuf>, Vec<u64>), String> {
+    trace!(?dir, base, "Discovering segments by base name");
     // First try direct path construction
     let result = discover_numbered_segments_direct(dir, base);
     if let Ok((segs, _)) = &result {
         if !segs.is_empty() {
+            debug!(segment_count = segs.len(), "Found segments via direct path");
             return result;
         }
     }
     
     // Fall back to directory scan for case-insensitive matching
+    trace!("Falling back to directory scan for case-insensitive matching");
     discover_numbered_segments_scan(dir, base)
 }
 
@@ -167,6 +174,7 @@ fn discover_numbered_segments_scan(dir: &Path, base: &str) -> Result<(Vec<PathBu
 
 /// Discover E01 segments (.E01, .E02, ..., .E99, .Ex00, .Ex01, etc.)
 pub fn discover_e01_segments(base_path: &str) -> Result<Vec<PathBuf>, String> {
+    debug!(base_path, "Discovering E01 segments");
     let path = Path::new(base_path);
     let parent = path.parent().ok_or("Invalid path")?;
     let stem = path.file_stem().ok_or("No filename")?.to_string_lossy();
@@ -183,12 +191,14 @@ pub fn discover_e01_segments(base_path: &str) -> Result<Vec<PathBuf>, String> {
         
         let segment_path = parent.join(&segment_name);
         if segment_path.exists() {
+            trace!(segment = i, ?segment_path, "Found E01 segment");
             paths.push(segment_path);
         } else {
             // Also try lowercase
             let segment_name_lower = segment_name.to_lowercase();
             let segment_path_lower = parent.join(&segment_name_lower);
             if segment_path_lower.exists() {
+                trace!(segment = i, ?segment_path_lower, "Found E01 segment (lowercase)");
                 paths.push(segment_path_lower);
             } else {
                 break;
@@ -196,6 +206,7 @@ pub fn discover_e01_segments(base_path: &str) -> Result<Vec<PathBuf>, String> {
         }
     }
     
+    debug!(segment_count = paths.len(), "E01 segments discovered");
     Ok(paths)
 }
 

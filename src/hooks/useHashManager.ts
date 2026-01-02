@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DiscoveredFile, ContainerInfo, SegmentHashResult, HashHistoryEntry, HashAlgorithm, VerifyEntry, StoredHash } from "../types";
+import type { DiscoveredFile, ContainerInfo, SegmentHashResult, HashHistoryEntry, HashAlgorithm, StoredHash } from "../types";
 import { normalizeError } from "../utils";
 import type { FileManager } from "./useFileManager";
 
@@ -25,7 +25,7 @@ export function useHashManager(fileManager: FileManager) {
   } = fileManager;
   
   // Hash state
-  const [selectedHashAlgorithm, setSelectedHashAlgorithm] = createSignal<HashAlgorithm>("sha1");
+  const [selectedHashAlgorithm, setSelectedHashAlgorithm] = createSignal<HashAlgorithm>("sha256");
   const [fileHashMap, setFileHashMap] = createSignal<Map<string, FileHashInfo>>(new Map());
   
   // Segment verification state
@@ -56,20 +56,45 @@ export function useHashManager(fileManager: FileManager) {
   const hashSingleFile = async (file: DiscoveredFile) => {
     const algorithm = selectedHashAlgorithm();
     updateFileStatus(file.path, "hashing", 0);
-    const unlisten = await listen<{ percent: number }>("verify-progress", (e) => updateFileStatus(file.path, "hashing", e.payload.percent));
+    // Listen for progress events, filtering by the file path to avoid mixing progress from multiple concurrent hashes
+    const unlisten = await listen<{ path: string; percent: number }>("verify-progress", (e) => {
+      if (e.payload.path === file.path) {
+        updateFileStatus(file.path, "hashing", e.payload.percent);
+      }
+    });
     try {
       let hash: string;
       const ctype = file.container_type.toLowerCase();
       if (ctype.includes("e01") || ctype.includes("encase") || ctype.includes("ex01")) {
         hash = await invoke<string>("e01_v3_verify", { inputPath: file.path, algorithm });
+      } else if (ctype.includes("ad1")) {
+        // AD1 containers - hash the segment files directly (not internal files)
+        try {
+          hash = await invoke<string>("ad1_hash_segments", { inputPath: file.path, algorithm });
+        } catch (ad1Err) {
+          // AD1 may fail if segments are missing - report gracefully
+          const errMsg = normalizeError(ad1Err);
+          console.warn(`AD1 hash failed: ${errMsg}`);
+          updateFileStatus(file.path, "error", 0, errMsg);
+          unlisten();
+          return;
+        }
       } else if (ctype.includes("raw") || ctype.includes("dd")) {
         hash = await invoke<string>("raw_verify", { inputPath: file.path, algorithm });
       } else if (ctype.includes("ufed") || ctype.includes("zip") || ctype.includes("archive") || ctype.includes("tar") || ctype.includes("7z")) {
         // UFED and archive containers - hash the file directly
         hash = await invoke<string>("raw_verify", { inputPath: file.path, algorithm });
       } else {
-        const r = await invoke<VerifyEntry[]>("logical_verify", { inputPath: file.path, algorithm });
-        hash = r.length > 0 && r[0].message ? r[0].message : "Complete";
+        // Unknown container type - try raw verification
+        try {
+          hash = await invoke<string>("raw_verify", { inputPath: file.path, algorithm });
+        } catch (rawErr) {
+          const errMsg = normalizeError(rawErr);
+          console.warn(`Verification failed for unknown type: ${errMsg}`);
+          updateFileStatus(file.path, "error", 0, errMsg);
+          unlisten();
+          return;
+        }
       }
       
       // Check if there's a stored hash to compare against
@@ -357,46 +382,60 @@ export function useHashManager(fileManager: FileManager) {
   const getAllStoredHashesSorted = (info: ContainerInfo | undefined): StoredHash[] => {
     if (!info) return [];
     
+    // Deep clone the entire info to escape SolidJS proxy completely
+    let plainInfo: ContainerInfo;
+    try {
+      plainInfo = JSON.parse(JSON.stringify(info));
+    } catch {
+      return [];
+    }
+    
     const allHashes: StoredHash[] = [];
     
     // E01 container hashes
-    if (info.e01?.stored_hashes) {
-      const containerDate = info.e01.acquiry_date;
-      info.e01.stored_hashes.forEach(h => {
+    if (plainInfo.e01?.stored_hashes) {
+      const containerDate = plainInfo.e01.acquiry_date;
+      for (const h of plainInfo.e01.stored_hashes) {
         allHashes.push({
-          ...h,
+          algorithm: h.algorithm || '',
+          hash: h.hash || '',
+          verified: h.verified ?? null,
           timestamp: h.timestamp || containerDate || null,
           source: h.source || 'container',
         });
-      });
+      }
     }
     
-    // UFED container hashes
-    if (info.ufed?.stored_hashes) {
-      const containerDate = info.ufed.extraction_info?.start_time;
-      info.ufed.stored_hashes.forEach(h => {
+    // UFED container hashes (include filename since UFED has per-file hashes)
+    if (plainInfo.ufed?.stored_hashes) {
+      const containerDate = plainInfo.ufed.extraction_info?.start_time;
+      for (const h of plainInfo.ufed.stored_hashes) {
         allHashes.push({
-          algorithm: h.algorithm,
-          hash: h.hash,
+          algorithm: h.algorithm || '',
+          hash: h.hash || '',
+          verified: null,
           timestamp: containerDate || null,
           source: 'container',
+          filename: h.filename || null,
         });
-      });
+      }
     }
     
     // Companion log hashes
-    if (info.companion_log?.stored_hashes) {
-      const logDate = info.companion_log.verification_finished || info.companion_log.acquisition_finished;
-      info.companion_log.stored_hashes.forEach(h => {
+    if (plainInfo.companion_log?.stored_hashes) {
+      const logDate = plainInfo.companion_log.verification_finished || plainInfo.companion_log.acquisition_finished;
+      for (const h of plainInfo.companion_log.stored_hashes) {
         allHashes.push({
-          ...h,
+          algorithm: h.algorithm || '',
+          hash: h.hash || '',
+          verified: h.verified ?? null,
           timestamp: h.timestamp || logDate || null,
           source: h.source || 'companion',
         });
-      });
+      }
     }
     
-    return allHashes.sort((a, b) => {
+    const sortedHashes = allHashes.sort((a, b) => {
       if (a.source === 'container' && b.source !== 'container') return -1;
       if (b.source === 'container' && a.source !== 'container') return 1;
       if (a.algorithm !== b.algorithm) return a.algorithm.localeCompare(b.algorithm);
@@ -405,13 +444,52 @@ export function useHashManager(fileManager: FileManager) {
       if (!b.timestamp) return -1;
       return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
     });
+    
+    return sortedHashes;
+  };
+
+  // Parse various date formats (UFED uses DD/MM/YYYY HH:MM:SS (timezone))
+  const parseTimestamp = (timestamp: string): Date | null => {
+    // Try standard Date parsing first
+    const standardDate = new Date(timestamp);
+    if (!isNaN(standardDate.getTime())) {
+      return standardDate;
+    }
+    
+    // Try UFED format: DD/MM/YYYY HH:MM:SS (timezone) e.g., "26/08/2024 17:48:01 (-4)"
+    const ufedMatch = timestamp.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*\(([+-]?\d+)\)?$/);
+    if (ufedMatch) {
+      const [, day, month, year, hour, minute, second, tzOffset] = ufedMatch;
+      // Parse timezone offset - UFED uses (-4) meaning UTC-4
+      const offset = parseInt(tzOffset, 10);
+      // Create date string in ISO format
+      const isoString = `${year}-${month}-${day}T${hour}:${minute}:${second}${offset >= 0 ? '+' : ''}${String(offset).padStart(2, '0')}:00`;
+      const d = new Date(isoString);
+      if (!isNaN(d.getTime())) {
+        return d;
+      }
+      // Fallback: just use date parts directly
+      return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second));
+    }
+    
+    // Try DD/MM/YYYY format without time
+    const dmyMatch = timestamp.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (dmyMatch) {
+      const [, day, month, year] = dmyMatch;
+      return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+    }
+    
+    return null;
   };
 
   // Format hash timestamp for display
   const formatHashDate = (timestamp: string): string => {
     try {
-      const d = new Date(timestamp);
-      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
+      const d = parseTimestamp(timestamp);
+      if (d) {
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
+      }
+      return timestamp;
     } catch {
       return timestamp;
     }

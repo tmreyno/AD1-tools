@@ -42,10 +42,17 @@ export function DetailPanel(props: DetailPanelProps) {
     debouncedFilterChange(value);
   };
   
+  // Reactive helpers that properly track props changes
+  const isHashing = () => props.fileStatus?.status === "hashing";
+  const isVerifyingSegments = () => props.fileStatus?.status === "verifying-segments";
+  const isIncomplete = () => (props.fileInfo?.ad1?.missing_segments?.length ?? 0) > 0;
+  const currentProgress = () => props.fileStatus?.progress ?? 0;
+  
   return (
     <main class="detail-panel">
       <Show 
         when={props.activeFile} 
+        keyed
         fallback={
           <div class="empty-detail">
             <span class="empty-icon">📋</span>
@@ -54,58 +61,84 @@ export function DetailPanel(props: DetailPanelProps) {
         }
       >
         {(file) => {
-          const isHashing = () => props.fileStatus?.status === "hashing";
-          const isVerifyingSegments = () => props.fileStatus?.status === "verifying-segments";
-          
           return (
             <div class="detail-content">
               {/* Header */}
               <div class="detail-header">
-                <span class={`detail-type ${typeClass(file().container_type)}`}>
-                  {typeIcon(file().container_type)} {file().container_type}
+                <span class={`detail-type ${typeClass(file.container_type)}`}>
+                  {typeIcon(file.container_type)} {file.container_type}
                 </span>
-                <h2>{file().filename}</h2>
-                <p class="detail-path">{file().path}</p>
+                <h2 title={file.filename}>{file.filename}</h2>
+                <p class="detail-path" title={file.path}>{file.path}</p>
               </div>
               
-              {/* Stats row */}
+              {/* Stats row - prioritize acquisition dates over filesystem dates */}
               <div class="stat-row">
                 <div class="stat-item">
                   <span class="stat-label">Size</span>
-                  <span class="stat-value">{formatBytes(file().size)}</span>
+                  <span class="stat-value" title={`${file.size.toLocaleString()} bytes`}>{formatBytes(file.size)}</span>
                 </div>
-                <Show when={file().segment_count}>
+                <Show when={file.segment_count}>
                   <div class="stat-item">
                     <span class="stat-label">Segments</span>
-                    <span class="stat-value">{file().segment_count}</span>
+                    <span class="stat-value" title={`${file.segment_count} segments`}>{file.segment_count}</span>
                   </div>
                 </Show>
-                <Show when={file().created}>
+                
+                {/* E01: Show acquisition date from header */}
+                <Show when={props.fileInfo?.e01?.acquiry_date}>
                   <div class="stat-item">
-                    <span class="stat-label">Created</span>
-                    <span class="stat-value">{file().created}</span>
+                    <span class="stat-label">Acquired</span>
+                    <span class="stat-value" title={`Acquisition date from E01 header: ${props.fileInfo!.e01!.acquiry_date}`}>{props.fileInfo!.e01!.acquiry_date}</span>
                   </div>
                 </Show>
-                <Show when={file().modified}>
+                
+                {/* AD1: Show acquisition date from companion log */}
+                <Show when={props.fileInfo?.ad1?.companion_log?.acquisition_date}>
                   <div class="stat-item">
-                    <span class="stat-label">Modified</span>
-                    <span class="stat-value">{file().modified}</span>
+                    <span class="stat-label">Acquired</span>
+                    <span class="stat-value" title={`Acquisition date from AD1 companion log: ${props.fileInfo!.ad1!.companion_log!.acquisition_date}`}>{props.fileInfo!.ad1!.companion_log!.acquisition_date}</span>
                   </div>
                 </Show>
+                
+                {/* UFED: Show extraction date */}
+                <Show when={props.fileInfo?.ufed?.extraction_info?.start_time}>
+                  <div class="stat-item">
+                    <span class="stat-label">Extracted</span>
+                    <span class="stat-value" title={`Extraction date from UFED metadata: ${props.fileInfo!.ufed!.extraction_info!.start_time}`}>{props.fileInfo!.ufed!.extraction_info!.start_time}</span>
+                  </div>
+                </Show>
+                
+                {/* Fallback to filesystem dates only if no container date */}
+                <Show when={!props.fileInfo?.e01?.acquiry_date && !props.fileInfo?.ad1?.companion_log?.acquisition_date && !props.fileInfo?.ufed?.extraction_info?.start_time}>
+                  <Show when={file.created}>
+                    <div class="stat-item">
+                      <span class="stat-label">File Created</span>
+                      <span class="stat-value" title={`Filesystem date (when file was created on disk): ${file.created}`}>{file.created}</span>
+                    </div>
+                  </Show>
+                  <Show when={file.modified}>
+                    <div class="stat-item">
+                      <span class="stat-label">File Modified</span>
+                      <span class="stat-value" title={`Filesystem date (when file was last modified): ${file.modified}`}>{file.modified}</span>
+                    </div>
+                  </Show>
+                </Show>
+                
                 <Show when={props.fileInfo?.ad1}>
                   <div class="stat-item">
                     <span class="stat-label">Items</span>
-                    <span class="stat-value">{props.fileInfo!.ad1!.item_count}</span>
+                    <span class="stat-value" title={`${props.fileInfo!.ad1!.item_count.toLocaleString()} items in AD1 container`}>{props.fileInfo!.ad1!.item_count.toLocaleString()}</span>
                   </div>
                 </Show>
                 <Show when={props.fileInfo?.e01}>
                   <div class="stat-item">
                     <span class="stat-label">Chunks</span>
-                    <span class="stat-value">{props.fileInfo!.e01!.chunk_count.toLocaleString()}</span>
+                    <span class="stat-value" title={`${props.fileInfo!.e01!.chunk_count.toLocaleString()} compressed chunks`}>{props.fileInfo!.e01!.chunk_count.toLocaleString()}</span>
                   </div>
                   <div class="stat-item">
                     <span class="stat-label">Sectors</span>
-                    <span class="stat-value">{props.fileInfo!.e01!.sector_count.toLocaleString()}</span>
+                    <span class="stat-value" title={`${props.fileInfo!.e01!.sector_count.toLocaleString()} sectors`}>{props.fileInfo!.e01!.sector_count.toLocaleString()}</span>
                   </div>
                 </Show>
               </div>
@@ -115,10 +148,10 @@ export function DetailPanel(props: DetailPanelProps) {
                 <div class="hash-progress-section">
                   <div class="hash-progress-header">
                     <span>🔐 Hashing with {props.selectedHashAlgorithm.toUpperCase()}...</span>
-                    <span class="hash-progress-percent">{props.fileStatus!.progress.toFixed(1)}%</span>
+                    <span class="hash-progress-percent">{currentProgress().toFixed(1)}%</span>
                   </div>
                   <div class="hash-progress-bar">
-                    <div class="hash-progress-fill" style={{ width: `${props.fileStatus!.progress}%` }} />
+                    <div class="hash-progress-fill" style={{ width: `${currentProgress()}%` }} />
                   </div>
                 </div>
               </Show>
@@ -171,36 +204,10 @@ export function DetailPanel(props: DetailPanelProps) {
                           <span class="hist-time">{entry.timestamp.toLocaleTimeString()}</span>
                           <span class="hist-algo">{entry.algorithm}</span>
                           <span class="hist-source">{entry.source}</span>
-                          <code class="hist-hash" title={entry.hash}>{entry.hash.substring(0, 16)}...</code>
+                          <code class="hist-hash">{entry.hash}</code>
                           <Show when={entry.verified === true}><span class="hist-badge ok">✓</span></Show>
                           <Show when={entry.verified === false}><span class="hist-badge fail">✗</span></Show>
                           <button class="hist-copy" onClick={() => navigator.clipboard.writeText(entry.hash)} title="Copy">📋</button>
-                        </div>
-                      )}
-                    </For>
-                  </div>
-                </div>
-              </Show>
-              
-              {/* Stored hashes */}
-              <Show when={props.storedHashes.length > 0}>
-                <div class="compact-section stored-hashes-compact">
-                  <div class="section-header-compact">
-                    <span class="section-title">📜 Stored Hashes</span>
-                  </div>
-                  <div class="stored-hash-list">
-                    <For each={props.storedHashes}>
-                      {(sh) => (
-                        <div class={`stored-hash-row ${sh.verified === true ? 'verified' : sh.verified === false ? 'failed' : ''}`}>
-                          <span class="sh-algo">{sh.algorithm}</span>
-                          <code class="sh-value">{sh.hash}</code>
-                          <Show when={sh.verified === true}><span class="sh-badge ok">✓</span></Show>
-                          <Show when={sh.verified === false}><span class="sh-badge fail">✗</span></Show>
-                          {sh.timestamp && <span class="sh-date" title={sh.timestamp}>{props.formatHashDate(sh.timestamp)}</span>}
-                          <span class={`sh-source ${sh.source || 'unknown'}`} title={`Source: ${sh.source || 'unknown'}`}>
-                            {sh.source === 'container' ? '📦' : sh.source === 'companion' ? '📄' : '💻'}
-                          </span>
-                          <button class="sh-copy" onClick={() => navigator.clipboard.writeText(sh.hash)} title="Copy">📋</button>
                         </div>
                       )}
                     </For>
@@ -216,10 +223,10 @@ export function DetailPanel(props: DetailPanelProps) {
                     <button 
                       class="verify-segments-btn" 
                       onClick={props.onVerifySegments} 
-                      disabled={props.busy || isVerifyingSegments()}
-                      title="Verify each segment against stored hash"
+                      disabled={props.busy || isVerifyingSegments() || isIncomplete()}
+                      title={isIncomplete() ? "Cannot verify: missing segments" : "Verify each segment against stored hash"}
                     >
-                      🔍 Verify Segments
+                      {isIncomplete() ? '⚠️ Incomplete' : '🔍 Verify Segments'}
                     </button>
                   </div>
                   <div class="segment-hash-list">
@@ -228,7 +235,7 @@ export function DetailPanel(props: DetailPanelProps) {
                         const computed = () => props.segmentResults.find(r => r.segment_name.toLowerCase() === sh.segment_name.toLowerCase());
                         return (
                           <div class={`segment-hash-row ${computed()?.verified === true ? 'verified' : computed()?.verified === false ? 'failed' : ''}`}>
-                            <span class="seg-name">{sh.segment_name}</span>
+                            <span class="seg-name" title={sh.segment_name}>{sh.segment_name}</span>
                             <span class="seg-algo">{sh.algorithm}</span>
                             <code class="seg-hash" title={sh.hash}>{sh.hash.substring(0, 16)}...</code>
                             <Show when={sh.size}><span class="seg-size">{formatBytes(sh.size!)}</span></Show>
@@ -251,7 +258,7 @@ export function DetailPanel(props: DetailPanelProps) {
                     <For each={props.segmentResults}>
                       {(sr) => (
                         <div class={`segment-hash-row ${sr.verified === true ? 'verified' : sr.verified === false ? 'failed' : ''}`}>
-                          <span class="seg-name">{sr.segment_name}</span>
+                          <span class="seg-name" title={sr.segment_name}>{sr.segment_name}</span>
                           <span class="seg-algo">{sr.algorithm}</span>
                           <code class="seg-hash" title={sr.computed_hash}>{sr.computed_hash.substring(0, 16)}...</code>
                           <span class="seg-size">{formatBytes(sr.size)}</span>
@@ -279,9 +286,9 @@ export function DetailPanel(props: DetailPanelProps) {
                 </div>
               </Show>
               
-              {/* Container details */}
+              {/* Container details - includes stored hashes */}
               <Show when={props.fileInfo}>
-                <ContainerDetails info={props.fileInfo!} />
+                <ContainerDetails info={props.fileInfo!} storedHashes={props.storedHashes} />
               </Show>
               
               {/* File tree */}
@@ -300,9 +307,9 @@ export function DetailPanel(props: DetailPanelProps) {
                   <div class="tree-list-compact">
                     <For each={props.filteredTree}>
                       {(entry) => (
-                        <div class={`tree-row ${entry.is_dir ? "dir" : "file"}`}>
+                        <div class={`tree-row ${entry.is_dir ? "dir" : "file"}`} title={entry.path}>
                           <span class="tree-icon">{entry.is_dir ? "📁" : "📄"}</span>
-                          <span class="tree-path">{entry.path}</span>
+                          <span class="tree-path" title={entry.path}>{entry.path}</span>
                           <span class="tree-size">{entry.is_dir ? "" : formatBytes(entry.size)}</span>
                         </div>
                       )}
@@ -349,8 +356,8 @@ export function DetailPanel(props: DetailPanelProps) {
 // Common Info Row Component - Single source of truth for rendering detail rows
 // ============================================================================
 
-type RowType = 'normal' | 'highlight' | 'device' | 'full-width' | 'hash';
-type RowFormat = 'text' | 'bytes' | 'mono' | 'notes' | 'list';
+type RowType = 'normal' | 'highlight' | 'device' | 'full-width' | 'hash' | 'warning';
+type RowFormat = 'text' | 'bytes' | 'mono' | 'notes' | 'list' | 'warning';
 
 interface InfoField {
   label: string;
@@ -381,6 +388,7 @@ function InfoRow(props: InfoField) {
     if (props.type === 'device') classes.push('device');
     if (props.type === 'full-width') classes.push('full-width');
     if (props.type === 'hash') classes.push('hash-row');
+    if (props.type === 'warning' || props.format === 'warning') classes.push('warning-row');
     return classes.join(' ');
   };
   
@@ -390,6 +398,7 @@ function InfoRow(props: InfoField) {
     if (props.format === 'notes') classes.push('notes');
     if (props.format === 'list') classes.push('seg-list');
     if (props.type === 'hash') classes.push('mono', 'hash-value');
+    if (props.format === 'warning') classes.push('warning-text');
     return classes.join(' ');
   };
   
@@ -416,7 +425,7 @@ function InfoRows(props: { fields: InfoField[] }) {
 // Normalize container info to common field structure
 // ============================================================================
 
-function normalizeContainerFields(info: ContainerInfo): InfoField[] {
+function normalizeContainerFields(info: ContainerInfo, storedHashes: StoredHash[]): InfoField[] {
   const fields: InfoField[] = [];
   
   // AD1
@@ -425,10 +434,21 @@ function normalizeContainerFields(info: ContainerInfo): InfoField[] {
     const log = ad1.companion_log;
     const vol = ad1.volume;
     
+    // Show warning if segments are missing
+    if (ad1.missing_segments && ad1.missing_segments.length > 0) {
+      fields.push({
+        label: '⚠️ Incomplete',
+        value: `Missing ${ad1.missing_segments.length} segment(s): ${ad1.missing_segments.join(', ')}`,
+        type: 'full-width',
+        format: 'warning'
+      });
+    }
+    
     fields.push(
       { label: 'Format', value: `AD1 (${ad1.logical.signature})` },
       { label: 'Version', value: ad1.logical.image_version },
-      { label: 'Segments', value: ad1.segment.segment_number },
+      { label: 'Segments', value: `${ad1.segment_files?.length ?? 0} / ${ad1.segment.segment_number}${ad1.missing_segments?.length ? ' (incomplete)' : ''}` },
+      { label: 'Total Size', value: ad1.total_size, format: 'bytes' },
       { label: 'Items', value: ad1.item_count },
       // Case metadata from companion log
       { label: 'Case #', value: log?.case_number, type: 'highlight' },
@@ -443,9 +463,7 @@ function normalizeContainerFields(info: ContainerInfo): InfoField[] {
       // Technical details
       { label: 'Chunk Size', value: ad1.logical.zlib_chunk_size, format: 'bytes' },
       { label: 'Source', value: ad1.logical.data_source_name, type: 'full-width' },
-      // Hashes from companion log
-      { label: 'MD5', value: log?.md5_hash, type: 'hash' },
-      { label: 'SHA1', value: log?.sha1_hash, type: 'hash' },
+      // Notes (hashes now displayed via storedHashes at end)
       { label: 'Notes', value: log?.notes, type: 'full-width', format: 'notes' },
     );
   }
@@ -469,6 +487,7 @@ function normalizeContainerFields(info: ContainerInfo): InfoField[] {
       { label: 'Serial #', value: e01.serial_number, type: 'device' },
       { label: 'Description', value: e01.description, type: 'full-width' },
       { label: 'Notes', value: e01.notes, type: 'full-width', format: 'notes' },
+      // Stored hashes now displayed via storedHashes at end
     );
   }
   
@@ -578,6 +597,23 @@ function normalizeContainerFields(info: ContainerInfo): InfoField[] {
     );
   }
   
+  // Add all stored hashes (unified display for all container types)
+  if (storedHashes && storedHashes.length > 0) {
+    for (const sh of storedHashes) {
+      const algo = sh.algorithm?.toUpperCase() || 'HASH';
+      const hash = sh.hash || '';
+      const sourceIcon = sh.source === 'container' ? '📦' : sh.source === 'companion' ? '📄' : '💻';
+      const verifyIcon = sh.verified === true ? ' ✓' : sh.verified === false ? ' ✗' : '';
+      // Show filename if available (UFED has per-file hashes)
+      const filenameLabel = sh.filename ? ` (${sh.filename})` : '';
+      fields.push({ 
+        label: `${sourceIcon} ${algo}${verifyIcon}${filenameLabel}`, 
+        value: hash, 
+        type: 'hash' 
+      });
+    }
+  }
+  
   return fields;
 }
 
@@ -585,8 +621,8 @@ function normalizeContainerFields(info: ContainerInfo): InfoField[] {
 // Container Details Component - Uses common template
 // ============================================================================
 
-function ContainerDetails(props: { info: ContainerInfo }) {
-  const fields = () => normalizeContainerFields(props.info);
+function ContainerDetails(props: { info: ContainerInfo; storedHashes: StoredHash[] }) {
+  const fields = () => normalizeContainerFields(props.info, props.storedHashes);
   
   return (
     <div class="compact-section">

@@ -1,10 +1,11 @@
-//! E01Handle - Main interface for E01 file access (like libewf_handle)
+//! EwfHandle - Main interface for EWF file access (E01/L01/Ex01/Lx01)
+//! Similar to libewf_handle in libewf
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use flate2::read::ZlibDecoder;
-use tracing::trace;
+use tracing::{trace, debug, instrument};
 
 use crate::common::{
     FileIoPool,
@@ -16,10 +17,11 @@ use super::types::*;
 use super::cache::ChunkCache;
 
 // =============================================================================
-// E01 Handle - Main Interface (like libewf_handle)
+// EWF Handle - Main Interface (like libewf_handle)
 // =============================================================================
 
-pub struct E01Handle {
+/// Handle for EWF format files (E01, L01, Ex01, Lx01)
+pub struct EwfHandle {
     /// File I/O pool managing all segment files
     pub(crate) file_pool: FileIoPool,
     /// Parsed segment file metadata
@@ -32,13 +34,21 @@ pub struct E01Handle {
     chunk_cache: ChunkCache,
     /// Stored image hashes from hash/digest sections
     pub(crate) stored_hashes: Vec<StoredImageHash>,
+    /// Header metadata (case info, examiner, dates, etc.)
+    pub(crate) header_info: HeaderInfo,
+    /// Pre-computed segment boundary cumulative offsets for fast lookup
+    segment_cumulative_sizes: Vec<u64>,
 }
 
-impl E01Handle {
-    /// Open E01 file set (like libewf_handle_open)
+impl EwfHandle {
+    /// Open EWF file set (like libewf_handle_open)
+    #[instrument(skip_all, fields(path))]
     pub fn open(path: &str) -> Result<Self, String> {
+        debug!(path, "Opening EWF handle");
+        
         // Step 1: Discover all segment files (like libewf_glob)
         let segment_paths = discover_e01_segments(path)?;
+        debug!(segment_count = segment_paths.len(), "Discovered EWF segments");
         
         // Step 2: Create file I/O pool
         let mut file_pool = FileIoPool::new(segment_paths, MAX_OPEN_FILES);
@@ -53,13 +63,33 @@ impl E01Handle {
             segment_sizes.push(size);
         }
         
+        // Step 3b: Pre-compute cumulative sizes for fast segment lookup
+        let mut segment_cumulative_sizes = Vec::with_capacity(segment_sizes.len());
+        let mut cumulative = 0u64;
+        for &size in &segment_sizes {
+            segment_cumulative_sizes.push(cumulative);
+            cumulative += size;
+        }
+        
         // Step 4: Parse sections globally (not per-segment!)
-        let (segments, volume_info, chunk_table, stored_hashes) = Self::parse_sections_globally(&mut file_pool, &segment_sizes)?;
+        let (segments, volume_info, chunk_table, stored_hashes, header_info) = Self::parse_sections_globally(&mut file_pool, &segment_sizes)?;
         
         let volume = volume_info.ok_or("No volume section found")?;
+        debug!(
+            chunk_count = volume.chunk_count,
+            sectors_per_chunk = volume.sectors_per_chunk,
+            sector_count = volume.sector_count,
+            "EWF volume info parsed"
+        );
         
         // Step 5: Create chunk cache
         let chunk_cache = ChunkCache::new(256); // Cache last 256 chunks
+        
+        debug!(
+            chunk_table_size = chunk_table.len(),
+            stored_hashes = stored_hashes.len(),
+            "E01 handle opened successfully"
+        );
         
         Ok(Self {
             file_pool,
@@ -68,6 +98,8 @@ impl E01Handle {
             chunk_table,
             chunk_cache,
             stored_hashes,
+            header_info,
+            segment_cumulative_sizes,
         })
     }
 
@@ -75,7 +107,7 @@ impl E01Handle {
     fn parse_sections_globally(
         file_pool: &mut FileIoPool,
         segment_sizes: &[u64],
-    ) -> Result<(Vec<SegmentFile>, Option<VolumeSection>, Vec<ChunkLocation>, Vec<StoredImageHash>), String> {
+    ) -> Result<(Vec<SegmentFile>, Option<VolumeSection>, Vec<ChunkLocation>, Vec<StoredImageHash>, HeaderInfo), String> {
         // Initialize segment file structures
         let mut segments: Vec<SegmentFile> = (0..file_pool.get_file_count())
             .map(|i| SegmentFile {
@@ -89,6 +121,7 @@ impl E01Handle {
         let mut volume_info: Option<VolumeSection> = None;
         let mut chunk_locations = Vec::new();
         let mut stored_hashes: Vec<StoredImageHash> = Vec::new();
+        let mut header_info = HeaderInfo::default();
         
         // Track sectors section for delta chunk scanning
         let mut sectors_data_offset: Option<u64> = None;
@@ -146,6 +179,21 @@ impl E01Handle {
             
             // Handle different section types
             match section_type.as_str() {
+                "header" => {
+                    // Header section contains zlib-compressed case metadata
+                    let data_global_offset = current_global_offset + 76;
+                    let (data_seg_idx, data_offset_in_seg) = Self::global_to_segment_offset(data_global_offset, segment_sizes)?;
+                    seg_section.data_offset = Some(data_global_offset);
+                    
+                    // Only parse first header section
+                    if header_info.acquiry_date.is_none() {
+                        if let Ok(parsed_header) = Self::read_header_section(file_pool, data_seg_idx, data_offset_in_seg, section_desc.size.saturating_sub(76)) {
+                            trace!("  Parsed header: case={:?} examiner={:?} acquiry_date={:?}", 
+                                     parsed_header.case_number, parsed_header.examiner_name, parsed_header.acquiry_date);
+                            header_info = parsed_header;
+                        }
+                    }
+                }
                 "volume" | "disk" => {
                     let data_global_offset = current_global_offset + 76;
                     let (data_seg_idx, data_offset_in_seg) = Self::global_to_segment_offset(data_global_offset, segment_sizes)?;
@@ -271,7 +319,7 @@ impl E01Handle {
             }
         }
         
-        Ok((segments, volume_info, chunk_locations, stored_hashes))
+        Ok((segments, volume_info, chunk_locations, stored_hashes, header_info))
     }
     
     /// Scan for delta/inline chunks in sectors section
@@ -340,6 +388,7 @@ impl E01Handle {
     }
 
     /// Convert global byte offset to (segment_index, offset_in_segment)
+    /// Static version for use during parsing
     fn global_to_segment_offset(global_offset: u64, segment_sizes: &[u64]) -> Result<(usize, u64), String> {
         let mut cumulative = 0u64;
         for (idx, &size) in segment_sizes.iter().enumerate() {
@@ -349,6 +398,185 @@ impl E01Handle {
             cumulative += size;
         }
         Err(format!("Global offset {} beyond all segments", global_offset))
+    }
+
+    /// Fast segment lookup using pre-computed cumulative sizes with binary search
+    #[inline]
+    fn global_to_segment_fast(&self, global_offset: u64) -> Result<(usize, u64), String> {
+        // Binary search for the segment containing this offset
+        let segment_count = self.segment_cumulative_sizes.len();
+        if segment_count == 0 {
+            return Err("No segments".to_string());
+        }
+        
+        // Binary search: find largest cumulative that's <= global_offset
+        let mut lo = 0;
+        let mut hi = segment_count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if mid + 1 < segment_count && self.segment_cumulative_sizes[mid + 1] <= global_offset {
+                lo = mid + 1;
+            } else if self.segment_cumulative_sizes[mid] > global_offset {
+                hi = mid;
+            } else {
+                // Found it - cumulative[mid] <= global_offset < cumulative[mid+1]
+                let offset_in_segment = global_offset - self.segment_cumulative_sizes[mid];
+                // Bounds check
+                if offset_in_segment >= self.segments[mid].file_size {
+                    return Err(format!("Offset {} beyond segment {} size {}", 
+                        global_offset, mid, self.segments[mid].file_size));
+                }
+                return Ok((mid, offset_in_segment));
+            }
+        }
+        
+        // Check if we're in the last segment
+        if lo < segment_count {
+            let offset_in_segment = global_offset - self.segment_cumulative_sizes[lo];
+            if offset_in_segment < self.segments[lo].file_size {
+                return Ok((lo, offset_in_segment));
+            }
+        }
+        
+        Err(format!("Global offset {} beyond all segments", global_offset))
+    }
+
+    /// Read multiple consecutive chunks efficiently - minimizes I/O by batching
+    /// Returns decompressed chunks in order
+    pub fn read_chunks_batch(&mut self, start_chunk: usize, count: usize) -> Result<Vec<Vec<u8>>, String> {
+        let chunk_size = (self.volume.sectors_per_chunk as usize) * (self.volume.bytes_per_sector as usize);
+        let total_chunks = self.get_chunk_count();
+        let end_chunk = (start_chunk + count).min(total_chunks);
+        let actual_count = end_chunk - start_chunk;
+        
+        if actual_count == 0 {
+            return Ok(Vec::new());
+        }
+        
+        // Collect chunk metadata first to plan I/O
+        let segment_sizes: Vec<u64> = self.segments.iter().map(|s| s.file_size).collect();
+        
+        // Group chunks by segment for efficient sequential reading
+        let mut segment_groups: Vec<(usize, Vec<(usize, ChunkLocation)>)> = Vec::new();
+        let mut current_seg = usize::MAX;
+        
+        for chunk_idx in start_chunk..end_chunk {
+            let location = match self.chunk_table.get(chunk_idx) {
+                Some(loc) => loc.clone(),
+                None => {
+                    // Zero-filled chunk
+                    if current_seg != usize::MAX {
+                        segment_groups.last_mut().unwrap().1.push((chunk_idx, ChunkLocation {
+                            segment_index: 0,
+                            section_index: 0,
+                            chunk_in_table: 0,
+                            offset: 0,
+                            base_offset: 0,
+                            sectors_base: 0,
+                            is_delta_chunk: false,
+                        }));
+                    } else {
+                        segment_groups.push((0, vec![(chunk_idx, ChunkLocation {
+                            segment_index: 0,
+                            section_index: 0,
+                            chunk_in_table: 0,
+                            offset: 0,
+                            base_offset: 0,
+                            sectors_base: 0,
+                            is_delta_chunk: false,
+                        })]));
+                        current_seg = 0;
+                    }
+                    continue;
+                }
+            };
+            
+            if location.segment_index != current_seg {
+                segment_groups.push((location.segment_index, vec![(chunk_idx, location)]));
+                current_seg = segment_groups.last().unwrap().0;
+            } else {
+                segment_groups.last_mut().unwrap().1.push((chunk_idx, location));
+            }
+        }
+        
+        // Read and decompress chunks
+        let mut results: Vec<(usize, Vec<u8>)> = Vec::with_capacity(actual_count);
+        
+        for (seg_idx, chunks_in_seg) in segment_groups {
+            let file = self.file_pool.get_file(self.segments[seg_idx].file_index)?;
+            
+            for (chunk_idx, location) in chunks_in_seg {
+                // Zero-filled chunk
+                if location.offset == 0 && location.sectors_base == 0 {
+                    let final_size = if chunk_idx == total_chunks - 1 {
+                        let remaining = self.volume.sector_count % self.volume.sectors_per_chunk as u64;
+                        if remaining > 0 {
+                            (remaining * self.volume.bytes_per_sector as u64) as usize
+                        } else {
+                            chunk_size
+                        }
+                    } else {
+                        chunk_size
+                    };
+                    results.push((chunk_idx, vec![0u8; final_size]));
+                    continue;
+                }
+                
+                // Calculate actual offset
+                let (offset_in_segment, is_compressed) = if location.is_delta_chunk {
+                    let is_compressed = (location.offset & 0x80000000) != 0;
+                    let data_offset = location.sectors_base + 4;
+                    let (_, offset_in_seg) = Self::global_to_segment_offset(data_offset, &segment_sizes)?;
+                    (offset_in_seg, is_compressed)
+                } else {
+                    let is_compressed = (location.offset & 0x80000000) != 0;
+                    let offset_value = (location.offset & 0x7FFFFFFF) as u64;
+                    let segment_local_offset = if location.base_offset > 0 {
+                        location.base_offset + offset_value
+                    } else {
+                        offset_value
+                    };
+                    let segment_start: u64 = segment_sizes.iter().take(location.segment_index).sum();
+                    let absolute_offset = segment_start + segment_local_offset;
+                    let (_, offset_in_seg) = Self::global_to_segment_offset(absolute_offset, &segment_sizes)?;
+                    (offset_in_seg, is_compressed)
+                };
+                
+                file.seek(SeekFrom::Start(offset_in_segment))
+                    .map_err(|e| format!("Seek failed: {}", e))?;
+                
+                let mut chunk_data = if is_compressed {
+                    let buffered = std::io::BufReader::with_capacity(65536, file.take(chunk_size as u64 * 2));
+                    let mut decoder = ZlibDecoder::new(buffered);
+                    let mut decompressed = Vec::with_capacity(chunk_size);
+                    decoder.read_to_end(&mut decompressed)
+                        .map_err(|e| format!("Decompression failed: {}", e))?;
+                    decompressed
+                } else {
+                    let mut uncompressed = vec![0u8; chunk_size];
+                    file.read_exact(&mut uncompressed)
+                        .map_err(|e| format!("Read failed: {}", e))?;
+                    uncompressed
+                };
+                
+                // Truncate last chunk if needed
+                if chunk_idx == total_chunks - 1 {
+                    let remaining = self.volume.sector_count % self.volume.sectors_per_chunk as u64;
+                    if remaining > 0 {
+                        let final_size = (remaining * self.volume.bytes_per_sector as u64) as usize;
+                        if chunk_data.len() > final_size {
+                            chunk_data.truncate(final_size);
+                        }
+                    }
+                }
+                
+                results.push((chunk_idx, chunk_data));
+            }
+        }
+        
+        // Sort by chunk index and extract data
+        results.sort_by_key(|(idx, _)| *idx);
+        Ok(results.into_iter().map(|(_, data)| data).collect())
     }
 
     /// Read a chunk by global index (like libewf_handle_read_buffer)
@@ -398,13 +626,12 @@ impl E01Handle {
             return Ok(vec![0u8; chunk_size]);
         }
         
-        let segment_sizes: Vec<u64> = self.segments.iter().map(|s| s.file_size).collect();
-        
+        // Use fast lookup with pre-computed cumulative sizes
         let (seg_idx, offset_in_segment, is_compressed) = if location.is_delta_chunk {
             let is_compressed = (location.offset & 0x80000000) != 0;
             let data_offset = location.sectors_base + 4;
             
-            let (seg_idx, offset_in_seg) = Self::global_to_segment_offset(data_offset, &segment_sizes)
+            let (seg_idx, offset_in_seg) = self.global_to_segment_fast(data_offset)
                 .map_err(|e| format!("Delta chunk {}: offset {} error: {}", chunk_index, data_offset, e))?;
             
             if chunk_index < 3 {
@@ -423,10 +650,11 @@ impl E01Handle {
                 offset_value
             };
             
-            let segment_start: u64 = segment_sizes.iter().take(location.segment_index).sum();
+            // Use fast lookup
+            let segment_start = self.segment_cumulative_sizes[location.segment_index];
             let absolute_offset = segment_start + segment_local_offset;
             
-            let (seg_idx, offset_in_segment) = match Self::global_to_segment_offset(absolute_offset, &segment_sizes) {
+            let (seg_idx, offset_in_segment) = match self.global_to_segment_fast(absolute_offset) {
                 Ok(result) => result,
                 Err(e) => {
                     trace!("Chunk {}: offset={:#x} compressed={} offset_value={} segment_local={} absolute={} ERROR: {}", 
@@ -619,6 +847,7 @@ impl E01Handle {
                 hashes.push(StoredImageHash {
                     algorithm: "MD5".to_string(),
                     hash: md5_hash,
+                    verified: None,
                     timestamp: None,
                     source: Some("container".to_string()),
                 });
@@ -649,6 +878,7 @@ impl E01Handle {
             hashes.push(StoredImageHash {
                 algorithm: "MD5".to_string(),
                 hash: md5_hash,
+                verified: None,
                 timestamp: None,
                 source: Some("container".to_string()),
             });
@@ -663,6 +893,7 @@ impl E01Handle {
                 hashes.push(StoredImageHash {
                     algorithm: "SHA1".to_string(),
                     hash: sha1_hash,
+                    verified: None,
                     timestamp: None,
                     source: Some("container".to_string()),
                 });
@@ -670,5 +901,89 @@ impl E01Handle {
         }
         
         Ok(hashes)
+    }
+
+    /// Read header section containing case metadata (zlib-compressed)
+    fn read_header_section(
+        file_pool: &mut FileIoPool,
+        file_index: usize,
+        offset: u64,
+        size: u64,
+    ) -> Result<HeaderInfo, String> {
+        let file = file_pool.get_file(file_index)?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("Failed to seek to header section: {}", e))?;
+        
+        // Read compressed data
+        let mut compressed = vec![0u8; size as usize];
+        file.read_exact(&mut compressed)
+            .map_err(|e| format!("Failed to read header section: {}", e))?;
+        
+        // Find zlib magic (78 9c) and decompress
+        let zlib_start = compressed.windows(2)
+            .position(|w| w == [0x78, 0x9c])
+            .unwrap_or(0);
+        
+        let mut decoder = ZlibDecoder::new(&compressed[zlib_start..]);
+        let mut decompressed = String::new();
+        decoder.read_to_string(&mut decompressed)
+            .map_err(|e| format!("Failed to decompress header: {}", e))?;
+        
+        // Parse tab-separated header format:
+        // Line 0: version (e.g., "1")
+        // Line 1: "main" or category
+        // Line 2: column headers (tab-separated): c, n, a, e, t, av, ov, m, u, p, r
+        // Line 3: values (tab-separated)
+        let lines: Vec<&str> = decompressed.lines().collect();
+        
+        let mut header = HeaderInfo::default();
+        
+        if lines.len() >= 4 {
+            let headers: Vec<&str> = lines[2].split('\t').collect();
+            let values: Vec<&str> = lines[3].split('\t').collect();
+            
+            for (i, &col) in headers.iter().enumerate() {
+                if i < values.len() {
+                    let val = values[i].trim();
+                    if !val.is_empty() {
+                        match col {
+                            "c" => header.case_number = Some(val.to_string()),
+                            "n" => header.evidence_number = Some(val.to_string()),
+                            "a" => header.description = Some(val.to_string()),
+                            "e" => header.examiner_name = Some(val.to_string()),
+                            "t" => header.notes = Some(val.to_string()),
+                            "av" => header.acquiry_sw_version = Some(val.to_string()),
+                            "ov" => header.acquiry_os = Some(val.to_string()),
+                            "m" => {
+                                // Parse date format "2017 12 14 11 52 41" -> "2017-12-14 11:52:41"
+                                if let Some(formatted) = Self::parse_ewf_date(val) {
+                                    header.acquiry_date = Some(formatted);
+                                }
+                            }
+                            "u" => {
+                                if let Some(formatted) = Self::parse_ewf_date(val) {
+                                    header.system_date = Some(formatted);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(header)
+    }
+
+    /// Parse EWF date format "YYYY MM DD HH MM SS" to "YYYY-MM-DD HH:MM:SS"
+    fn parse_ewf_date(s: &str) -> Option<String> {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() >= 6 {
+            Some(format!("{}-{}-{} {}:{}:{}", 
+                parts[0], parts[1], parts[2],
+                parts[3], parts[4], parts[5]))
+        } else {
+            None
+        }
     }
 }

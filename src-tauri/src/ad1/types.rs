@@ -64,6 +64,18 @@ pub struct TreeEntry {
 pub struct VerifyEntry {
     pub path: String,
     pub status: String,
+    /// The hash algorithm used (e.g., "md5", "sha1")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algorithm: Option<String>,
+    /// The computed hash value
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computed: Option<String>,
+    /// The stored hash value from AD1 metadata (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored: Option<String>,
+    /// File size in bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// Complete AD1 container information
@@ -74,6 +86,12 @@ pub struct Ad1Info {
     pub item_count: u64,
     pub tree: Option<Vec<TreeEntry>>,
     pub segment_files: Option<Vec<String>>,
+    /// Size of each segment file in bytes
+    pub segment_sizes: Option<Vec<u64>>,
+    /// Total size of all segment files combined
+    pub total_size: Option<u64>,
+    /// Missing segment files (incomplete container)
+    pub missing_segments: Option<Vec<String>>,
     pub volume: Option<VolumeInfo>,
     pub companion_log: Option<CompanionLogInfo>,
 }

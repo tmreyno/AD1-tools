@@ -2,27 +2,29 @@
 
 use serde::Serialize;
 
+// Re-export StoredHash from containers for backward compatibility
+pub use crate::containers::StoredHash as StoredImageHash;
+
 // =============================================================================
-// Core Constants
+// Core Constants - EWF Signatures
 // =============================================================================
 
+/// EVF v1 signature (E01 - physical disk image)
 pub(crate) const EWF_SIGNATURE: &[u8; 8] = b"EVF\x09\x0d\x0a\xff\x00";
+/// EVF v2 signature (Ex01 - physical disk image)
 pub(crate) const EWF2_SIGNATURE: &[u8; 8] = b"EVF2\x0d\x0a\x81\x00";
+/// LVF v1 signature (L01 - logical evidence file)
+pub(crate) const LVF_SIGNATURE: &[u8; 8] = b"LVF\x09\x0d\x0a\xff\x00";
+/// LVF v2 signature (Lx01 - logical evidence file)
+pub(crate) const LVF2_SIGNATURE: &[u8; 8] = b"LVF2\x0d\x0a\x81\x00";
+
+// =============================================================================
+// Core Constants - Sizes
+// =============================================================================
+
 #[allow(dead_code)]
 pub(crate) const SECTOR_SIZE: u64 = 512;
 pub(crate) const MAX_OPEN_FILES: usize = 16; // Like libewf's rlimit handling
-
-// =============================================================================
-// Stored Hash Types - Hashes embedded in EWF file headers
-// =============================================================================
-
-#[derive(Serialize, Clone, Debug)]
-pub struct StoredImageHash {
-    pub algorithm: String,
-    pub hash: String,
-    pub timestamp: Option<String>,  // When hash was created (from acquiry_date)
-    pub source: Option<String>,     // Source: "container" for embedded hashes
-}
 
 // =============================================================================
 // Section Descriptors - EWF Format Structures
@@ -86,6 +88,20 @@ pub(crate) struct TableSection {
     pub offsets: Vec<u64>,
 }
 
+/// Header metadata parsed from EWF header section
+#[derive(Clone, Debug, Default)]
+pub struct HeaderInfo {
+    pub case_number: Option<String>,
+    pub evidence_number: Option<String>,
+    pub description: Option<String>,
+    pub examiner_name: Option<String>,
+    pub notes: Option<String>,
+    pub acquiry_date: Option<String>,
+    pub system_date: Option<String>,
+    pub acquiry_os: Option<String>,
+    pub acquiry_sw_version: Option<String>,
+}
+
 // =============================================================================
 // Chunk Location - Maps chunks to their storage location
 // =============================================================================
@@ -107,8 +123,9 @@ pub(crate) struct ChunkLocation {
 // Public API Types
 // =============================================================================
 
+/// Container information for EWF format files (E01, L01, Ex01, Lx01)
 #[derive(Serialize)]
-pub struct E01Info {
+pub struct EwfInfo {
     pub format_version: String,
     pub segment_count: u32,
     pub chunk_count: u32,

@@ -23,6 +23,31 @@ interface FileRowProps {
 }
 
 export function FileRow(props: FileRowProps) {
+  // Check if container is incomplete (missing segments)
+  const isIncomplete = () => (props.fileInfo?.ad1?.missing_segments?.length ?? 0) > 0;
+  
+  // Get total container size (all segments combined) when available
+  const totalContainerSize = () => {
+    const info = props.fileInfo;
+    if (info?.ad1?.total_size) return info.ad1.total_size;
+    if (info?.e01?.total_size) return info.e01.total_size;
+    if (info?.l01?.total_size) return info.l01.total_size;
+    if (info?.raw?.total_size) return info.raw.total_size;
+    if (info?.archive?.total_size) return info.archive.total_size;
+    return null;
+  };
+  
+  // Display size: use total container size if available, otherwise first segment size
+  const displaySize = () => totalContainerSize() ?? props.file.size;
+  const hasMultipleSegments = () => (props.file.segment_count ?? 1) > 1;
+  const sizeLabel = () => {
+    const total = totalContainerSize();
+    if (total && hasMultipleSegments()) {
+      return `Total: ${formatBytes(total)} (${props.file.segment_count} segments, first segment: ${formatBytes(props.file.size)})`;
+    }
+    return `${formatBytes(displaySize())}`;
+  };
+  
   // Unified hash indicator logic
   const storedHashCount = () => (props.fileInfo?.e01?.stored_hashes?.length ?? 0) + (props.fileInfo?.companion_log?.stored_hashes?.length ?? 0);
   const historyCount = () => props.hashHistory?.length ?? 0;
@@ -74,6 +99,8 @@ export function FileRow(props: FileRowProps) {
   
   // Determine hash state
   const hashState = () => {
+    // Check for incomplete container first
+    if (isIncomplete()) return "incomplete";
     const hash = props.fileHash;
     if (hash?.verified === true) return "verified";
     if (hash?.verified === false) return "failed";
@@ -107,7 +134,7 @@ export function FileRow(props: FileRowProps) {
       <div class="file-info">
         <span class="file-name" title={props.file.path}>{props.file.filename}</span>
         <span class="file-meta">
-          {formatBytes(props.file.size)}
+          <span title={sizeLabel()}>{formatBytes(displaySize())}</span>
           <Show when={props.file.segment_count && props.file.segment_count > 1}>
             <span class="seg-count">• {props.file.segment_count} segs</span>
           </Show>
@@ -194,6 +221,18 @@ export function FileRow(props: FileRowProps) {
               <span class="hash-badge">{totalHashCount()}</span>
             </span>
           </button>
+        </Show>
+        
+        <Show when={!isHashing() && !isCompleting() && hashState() === "incomplete"}>
+          <span 
+            class="hash-indicator incomplete" 
+            title={`⚠️ Incomplete: Missing ${props.fileInfo?.ad1?.missing_segments?.length ?? 0} segment(s)\nCannot hash - segments are missing`}
+          >
+            <span class="hash-status">⚠</span>
+            <span class="hash-icon-wrap">
+              <span class="hash-icon">#</span>
+            </span>
+          </span>
         </Show>
         
         <Show when={!isHashing() && !isCompleting() && hashState() === "stored"}>

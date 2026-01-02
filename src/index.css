@@ -1,0 +1,1678 @@
+/*
+ * ============================================================================
+ * INDEX.CSS - Component Styles (Tailwind)
+ * ============================================================================
+ * 
+ * CONVENTION:
+ * -----------
+ * This file contains ALL component styles using Tailwind @apply:
+ *   - FilePanel, DetailPanel, TreePanel
+ *   - Toolbar, StatusBar
+ *   - Hash indicators, badges, buttons
+ *   - File rows, tree nodes
+ *   - Cards, sections, tooltips
+ *   - Any UI component styling
+ * 
+ * Global layout and theming is in App.css.
+ * Use CSS variables from App.css (e.g., bg-bg-panel maps to --bg-panel).
+ * 
+ * When adding new styles:
+ *   - Use @apply with Tailwind utilities
+ *   - Group related styles in @layer components
+ *   - Reference CSS variables via Tailwind config mappings
+ * ============================================================================
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base layer overrides */
+@layer base {
+  * {
+    @apply box-border m-0 p-0;
+  }
+  
+  html, body, #root {
+    @apply h-full;
+  }
+  
+  body {
+    @apply font-sans text-base text-txt bg-bg overflow-hidden antialiased;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border rounded;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-txt-faint;
+  }
+}
+
+/* Component layer - reusable component classes */
+@layer components {
+  /* ===== BUTTONS ===== */
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium cursor-pointer transition-all duration-150 whitespace-nowrap;
+  }
+  
+  .btn-default {
+    @apply bg-bg-card border border-border text-txt;
+  }
+  .btn-default:hover:not(:disabled) {
+    @apply bg-bg-hover border-txt-muted;
+  }
+  
+  .btn-primary {
+    @apply bg-accent border-accent text-white;
+  }
+  .btn-primary:hover:not(:disabled) {
+    @apply bg-[#1a6fe8];
+  }
+  
+  .btn-secondary {
+    @apply bg-transparent border border-border text-txt;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    @apply bg-bg-hover border-txt-muted;
+  }
+  
+  .btn:disabled {
+    @apply opacity-50 cursor-not-allowed;
+  }
+
+  /* ===== INPUTS ===== */
+  .input {
+    @apply px-2.5 py-1.5 bg-bg border border-border rounded text-txt text-sm;
+  }
+  .input:focus {
+    @apply outline-none border-accent;
+  }
+  
+  .select {
+    @apply px-2.5 py-1.5 bg-bg-card border border-border rounded text-txt text-sm cursor-pointer;
+  }
+
+  /* ===== TYPE BADGES ===== */
+  .type-badge {
+    @apply text-2xs font-medium px-1.5 py-0.5 rounded bg-bg-hover text-txt-muted border border-transparent cursor-pointer transition-all duration-150;
+  }
+  .type-badge:hover {
+    @apply brightness-110 scale-[1.02];
+  }
+  .type-badge.active {
+    @apply outline outline-2 outline-current outline-offset-1 scale-105 font-semibold;
+  }
+  .type-badge-ad1 {
+    @apply bg-accent-soft text-accent;
+  }
+  .type-badge-e01 {
+    @apply bg-success-soft text-success;
+  }
+  .type-badge-l01 {
+    @apply bg-warning-soft text-warning;
+  }
+  .type-badge-raw {
+    @apply bg-[rgba(163,113,247,0.15)] text-type-raw;
+  }
+  .type-badge-ufed {
+    @apply bg-[rgba(56,182,255,0.15)] text-type-ufed;
+  }
+  .type-badge-archive {
+    @apply bg-[rgba(255,123,114,0.15)] text-type-archive;
+  }
+  .type-badge-tar {
+    @apply bg-[rgba(255,166,87,0.15)] text-type-tar;
+  }
+
+  /* ===== TYPE ICONS ===== */
+  .type-icon {
+    @apply w-6 h-6 flex items-center justify-center rounded text-sm bg-bg-hover shrink-0;
+  }
+  .type-icon-ad1 { @apply bg-accent-soft; }
+  .type-icon-e01 { @apply bg-success-soft; }
+  .type-icon-l01 { @apply bg-warning-soft; }
+  .type-icon-raw { @apply bg-[rgba(163,113,247,0.15)]; }
+  .type-icon-ufed { @apply bg-[rgba(56,182,255,0.15)]; }
+  .type-icon-archive { @apply bg-[rgba(255,123,114,0.15)]; }
+  .type-icon-tar { @apply bg-[rgba(255,166,87,0.15)]; }
+
+  /* ===== DETAIL TYPE LABEL ===== */
+  .detail-type {
+    @apply inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider py-1 px-2.5 border-l-[3px] bg-transparent mb-2;
+  }
+  .detail-type-ad1 { @apply border-accent text-accent; }
+  .detail-type-e01 { @apply border-success text-success; }
+  .detail-type-l01 { @apply border-warning text-warning; }
+  .detail-type-raw { @apply border-type-raw text-type-raw; }
+  .detail-type-ufed { @apply border-type-ufed text-type-ufed; }
+  .detail-type-archive { @apply border-type-tar text-type-tar; }
+
+  /* ===== HASH INDICATOR ===== */
+  .hash-indicator {
+    @apply inline-flex items-center gap-1 p-0.5 rounded text-xs font-semibold cursor-pointer border-none bg-transparent;
+  }
+  .hash-indicator.clickable {
+    @apply transition-transform duration-100;
+  }
+  .hash-indicator.clickable:hover:not(:disabled) {
+    @apply scale-110;
+  }
+  .hash-indicator.clickable:active:not(:disabled) {
+    @apply scale-95;
+  }
+  .hash-indicator.clickable:disabled {
+    @apply opacity-40 cursor-not-allowed;
+  }
+  .hash-indicator.hashing { @apply text-accent; }
+  .hash-indicator.verified { @apply text-success; }
+  .hash-indicator.failed { @apply text-error; }
+  .hash-indicator.computed { @apply text-success; }
+  .hash-indicator.stored { @apply text-warning; }
+  .hash-indicator.none { @apply text-txt-muted opacity-50; }
+  .hash-indicator.none:hover:not(:disabled) { @apply opacity-100 text-txt; }
+
+  /* ===== VERIFY STATUS BADGES ===== */
+  .verify-badge {
+    @apply text-2xs font-semibold px-1.5 py-0.5 rounded;
+  }
+  .verify-badge-ok { @apply bg-success-soft text-success; }
+  .verify-badge-fail { @apply bg-error-soft text-error; }
+  .verify-badge-neutral { @apply bg-bg-card text-txt-muted border border-border; }
+
+  /* ===== SECTION STYLES (Report) ===== */
+  .section-title {
+    @apply text-sm font-bold uppercase tracking-wider text-txt mb-3 pb-1.5 border-b-2 border-accent inline-block;
+  }
+  
+  .compact-section {
+    @apply bg-transparent border-none border-t border-border py-4 mb-0;
+  }
+  .compact-section:first-child {
+    @apply border-t-0 pt-0;
+  }
+
+  /* ===== INFO ROW (Report Style) ===== */
+  .info-row {
+    @apply flex flex-col gap-0.5 py-1 border-b border-dotted border-border-muted;
+  }
+  .info-row:last-child {
+    @apply border-b-0;
+  }
+  .info-row.full-width {
+    @apply col-span-full;
+  }
+  .info-row.highlight {
+    @apply bg-transparent border-l-[3px] border-l-accent pl-2 my-1 border-b-0;
+  }
+  .info-row.device {
+    @apply bg-transparent border-l-[3px] border-l-success pl-2 border-b-0;
+  }
+  
+  .info-label {
+    @apply text-2xs font-semibold uppercase tracking-wider text-txt-muted;
+  }
+  
+  .info-value {
+    @apply text-base text-txt font-normal leading-relaxed break-words;
+  }
+  .info-value.mono {
+    @apply font-mono text-xs break-all bg-transparent;
+  }
+  .info-value.hash-value {
+    @apply font-mono text-xs text-txt break-all bg-transparent select-all;
+  }
+  .info-value.notes {
+    @apply text-sm text-txt whitespace-pre-wrap break-words bg-transparent p-0 leading-relaxed;
+  }
+
+  /* ===== HASH CARD (Report Style) ===== */
+  .hash-card {
+    @apply bg-transparent border-none border-l-4 border-l-success py-3 pl-4 mb-5;
+  }
+  .hash-card.no-stored { @apply border-l-txt-muted; }
+  .hash-card.verified { @apply border-l-success; }
+  .hash-card.failed { @apply border-l-error; }
+
+  /* ===== STORED HASH ROW (Report Style) ===== */
+  .stored-hash-row {
+    @apply flex items-center gap-2 py-2 bg-transparent border-0 border-b border-dotted border-border-muted flex-nowrap;
+  }
+  .stored-hash-row:last-child { @apply border-b-0; }
+  .stored-hash-row.verified { @apply border-l-[3px] border-l-success pl-2.5; }
+  .stored-hash-row.failed { @apply border-l-[3px] border-l-error pl-2.5; }
+
+  /* ===== FILE ROW ===== */
+  .file-row {
+    @apply flex items-center gap-1.5 py-1.5 px-2 my-px rounded cursor-pointer transition-colors duration-100 relative;
+  }
+  .file-row:hover { @apply bg-bg-hover; }
+  .file-row.selected { @apply bg-accent-soft; }
+  .file-row.active { @apply bg-accent-soft outline outline-1 outline-accent; }
+  .file-row.focused { @apply outline-2 outline-dashed outline-accent outline-offset-[-2px]; }
+  .file-row.focused.active { @apply outline-2 outline outline-accent; }
+
+  /* ===== STATUS ROW ===== */
+  .status-row {
+    @apply flex items-center gap-2 px-4 py-1.5 text-sm;
+  }
+  .status-row.idle { @apply bg-bg-card text-txt-muted; }
+  .status-row.working { @apply bg-warning-soft text-warning; }
+  .status-row.ok { @apply bg-success-soft text-success; }
+  .status-row.error { @apply bg-error-soft text-error; }
+
+  /* ===== TOOLTIP ===== */
+  .tooltip {
+    @apply absolute left-[calc(100%+8px)] top-0 z-50 w-72 bg-bg-card border border-border rounded-lg p-3 shadow-lg pointer-events-none;
+  }
+
+  /* ===== PROGRESS BAR ===== */
+  .progress-bar {
+    @apply h-1.5 bg-accent/20 rounded overflow-hidden;
+  }
+  .progress-fill {
+    @apply h-full bg-accent rounded transition-[width] duration-150 ease-out;
+  }
+  .progress-fill.indeterminate {
+    @apply bg-gradient-to-r from-transparent via-accent to-transparent animate-indeterminate;
+  }
+}
+
+/* Utility layer - custom utilities */
+@layer utilities {
+  .text-ellipsis-single {
+    @apply whitespace-nowrap overflow-hidden text-ellipsis;
+  }
+  
+  .select-all {
+    user-select: all;
+  }
+  
+  /* Animation utilities */
+  .animate-pulse-slow {
+    animation: pulse 1s ease-in-out infinite;
+  }
+}
+
+/* ============================================================================
+   LEGACY COMPATIBILITY LAYER
+   These classes map old CSS names to Tailwind for backward compatibility.
+   Components will be gradually migrated to inline Tailwind classes.
+   ============================================================================ */
+
+/* File Panel */
+.file-panel {
+  @apply w-full h-full flex flex-col bg-bg-panel border-r border-border overflow-hidden;
+}
+
+.panel-header {
+  @apply flex items-center justify-between px-3 py-2.5 border-b border-border-muted;
+}
+
+.panel-header h3 {
+  @apply text-xs font-semibold uppercase tracking-wider text-txt-muted;
+}
+
+.type-summary {
+  @apply flex flex-wrap gap-1 px-3 py-2 border-b border-border-muted;
+}
+
+.select-all-row {
+  @apply px-3 py-1.5 border-b border-border-muted;
+}
+
+.check-label {
+  @apply flex items-center gap-2 text-sm text-txt-muted cursor-pointer;
+}
+
+.check-label input {
+  @apply accent-accent;
+}
+
+.file-list {
+  @apply flex-1 overflow-y-auto p-1;
+}
+
+.file-list:focus {
+  @apply outline-none;
+}
+
+.file-list:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent-soft, rgba(47, 129, 247, 0.15));
+}
+
+.file-list.keyboard-active {
+  @apply bg-accent/5;
+}
+
+/* File Row (compat) */
+.file-info {
+  @apply flex-1 min-w-0;
+}
+
+.file-name {
+  @apply block text-sm font-medium truncate;
+}
+
+.file-meta {
+  @apply flex gap-1.5 text-xs text-txt-faint;
+}
+
+.seg-count {
+  @apply text-txt-muted;
+}
+
+.file-actions {
+  @apply flex items-center gap-1;
+}
+
+/* Empty State */
+.empty-state {
+  @apply flex flex-col items-center justify-center px-6 py-12 text-center text-txt-muted;
+}
+
+.empty-icon {
+  @apply text-5xl mb-4 opacity-50;
+}
+
+.empty-hint {
+  @apply text-xs text-txt-faint;
+}
+
+/* Item Count Badge */
+.item-count-badge {
+  @apply text-2xs font-semibold text-txt-muted px-1 py-0.5 bg-bg-hover rounded flex items-center gap-0.5;
+}
+
+/* Hash Indicator (compat) */
+.hash-icon-wrap {
+  @apply relative inline-flex items-center justify-center;
+}
+
+.hash-icon {
+  @apply text-base font-black leading-none opacity-70;
+}
+
+.hash-badge {
+  @apply absolute -top-[5px] -right-[6px] min-w-[13px] h-[13px] px-[3px] text-[9px] font-bold leading-[13px] text-center rounded-full bg-success text-white shadow;
+}
+
+.hash-badge.fail {
+  @apply bg-error;
+}
+
+.hash-status {
+  @apply text-sm font-bold font-mono leading-none;
+}
+
+.hash-status.stacked-checks {
+  @apply relative inline-flex w-4 h-4;
+}
+
+.hash-status.stacked-checks .check-1 {
+  @apply absolute -top-0.5 left-0 text-base font-black;
+}
+
+.hash-status.stacked-checks .check-2 {
+  @apply absolute top-px left-[3px] text-base font-black;
+}
+
+/* File Tooltip */
+.file-tooltip {
+  @apply absolute left-[calc(100%+8px)] top-0 z-50 w-72 bg-bg-card border border-border rounded-lg p-3 shadow-lg pointer-events-none;
+}
+
+.tooltip-header {
+  @apply text-xs font-semibold uppercase tracking-wider text-accent mb-1.5;
+}
+
+.tooltip-path {
+  @apply text-2xs text-txt-faint break-all mb-2 pb-2 border-b border-border-muted;
+}
+
+.tooltip-row {
+  @apply flex justify-between text-xs py-0.5;
+}
+
+.tooltip-row span:first-child {
+  @apply text-txt-muted;
+}
+
+.tooltip-row span:last-child {
+  @apply text-txt font-medium;
+}
+
+.tooltip-divider {
+  @apply h-px bg-border-muted my-1.5;
+}
+
+.tooltip-section-title {
+  @apply text-2xs font-semibold text-warning mb-1;
+}
+
+.tooltip-hash-row {
+  @apply flex items-center gap-1.5 text-2xs my-0.5 flex-wrap;
+}
+
+.tooltip-hash-algo {
+  @apply font-semibold text-txt-muted min-w-[45px];
+}
+
+.tooltip-hash-val {
+  @apply font-mono text-[9px] text-txt-faint;
+}
+
+.tooltip-verified {
+  @apply text-success text-2xs;
+}
+
+.tooltip-date {
+  @apply text-[9px] text-txt-faint ml-auto;
+}
+
+.tooltip-hash {
+  @apply mt-1;
+}
+
+.tooltip-hash .hash-algo {
+  @apply block text-2xs font-semibold text-success mb-1;
+}
+
+.tooltip-hash code {
+  @apply font-mono text-[9px] text-txt-muted break-all;
+}
+
+/* ===== TABBED DETAIL PANEL ===== */
+.tabbed-detail-panel {
+  @apply flex flex-col h-full overflow-hidden;
+}
+
+.detail-tab-bar {
+  @apply flex items-center bg-bg-panel border-b border-border shrink-0;
+}
+
+.detail-tabs {
+  @apply flex items-center flex-1 overflow-x-auto gap-0.5 px-1 py-1;
+  scrollbar-width: thin;
+  scroll-behavior: smooth;
+}
+
+.detail-tabs::-webkit-scrollbar {
+  @apply h-1.5;
+}
+
+.detail-tabs::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+.detail-tabs::-webkit-scrollbar-thumb {
+  @apply bg-border rounded;
+}
+
+.detail-tabs::-webkit-scrollbar-thumb:hover {
+  @apply bg-txt-muted;
+}
+
+.detail-tab {
+  @apply flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t cursor-grab border border-transparent border-b-0 bg-bg-card/50 text-txt-muted transition-all duration-150 whitespace-nowrap shrink-0;
+  user-select: none;
+  min-width: 100px;
+  max-width: 200px;
+}
+
+/* Hide tab icon */
+.detail-tab .tab-icon {
+  @apply hidden;
+}
+
+/* Allow child elements to be clickable but not interfere with drag */
+.detail-tab .tab-label {
+  pointer-events: none;
+}
+
+.detail-tab .detail-tab-close,
+.detail-tab .tab-move-btn {
+  pointer-events: auto;
+}
+
+.detail-tab:hover {
+  @apply bg-bg-card text-txt;
+}
+
+.detail-tab.active {
+  @apply bg-bg text-txt border-border border-b-bg relative;
+}
+
+.detail-tab.active::after {
+  content: '';
+  @apply absolute -bottom-px left-0 right-0 h-px bg-bg;
+}
+
+/* Drag and drop visual feedback */
+.detail-tab.dragging {
+  @apply opacity-50;
+  cursor: grabbing !important;
+}
+
+.detail-tab.drag-over {
+  @apply border-l-2 border-l-accent bg-accent/10;
+}
+
+.tab-label {
+  @apply truncate flex-1;
+}
+
+.tab-close,
+.detail-tab-close {
+  @apply ml-1 w-4 h-4 flex items-center justify-center text-xs rounded hover:bg-white/10 text-txt-muted hover:text-txt shrink-0 bg-transparent border-none cursor-pointer transition-colors;
+}
+
+.tab-close:hover,
+.detail-tab-close:hover {
+  @apply bg-error/20 text-error;
+}
+
+.tab-move-btn {
+  @apply w-4 h-4 flex items-center justify-center text-2xs rounded text-txt-muted hover:text-txt hover:bg-white/10 shrink-0 bg-transparent border-none cursor-pointer transition-colors opacity-0;
+}
+
+.detail-tab:hover .tab-move-btn {
+  @apply opacity-100;
+}
+
+.tab-bar-actions {
+  @apply flex items-center gap-1 px-2 shrink-0;
+}
+
+/* View mode selector */
+.view-mode-selector {
+  @apply flex items-center gap-0.5 mr-2 bg-bg-card rounded border border-border;
+}
+
+.view-mode-btn {
+  @apply px-2 py-1 text-2xs font-medium bg-transparent border-none text-txt-muted cursor-pointer transition-all;
+}
+
+.view-mode-btn:first-child {
+  @apply rounded-l;
+}
+
+.view-mode-btn:last-child {
+  @apply rounded-r;
+}
+
+.view-mode-btn:hover {
+  @apply text-txt bg-bg-hover;
+}
+
+.view-mode-btn.active {
+  @apply bg-accent text-white;
+}
+
+/* Content area wrapper */
+.detail-content-area {
+  @apply flex-1 overflow-hidden;
+}
+
+.tab-action-btn {
+  @apply px-2 py-1 text-2xs font-medium rounded bg-transparent border border-border text-txt-muted hover:bg-bg-card hover:text-txt cursor-pointer transition-colors;
+}
+
+.tab-action-btn:disabled {
+  @apply opacity-40 cursor-not-allowed;
+}
+
+/* Tab Context Menu */
+.tab-context-menu {
+  @apply fixed z-50 bg-bg-panel border border-border rounded shadow-lg py-1 min-w-[140px];
+}
+
+.tab-context-menu button {
+  @apply w-full text-left px-3 py-1.5 text-xs bg-transparent border-none text-txt cursor-pointer hover:bg-accent/20;
+}
+
+.tab-context-menu hr {
+  @apply my-1 border-t border-border;
+}
+
+/* Detail Panel */
+.detail-panel {
+  @apply flex-1 overflow-y-auto bg-bg;
+}
+
+.empty-detail {
+  @apply flex flex-col items-center justify-center h-full text-txt-muted;
+}
+
+.detail-content {
+  @apply px-8 py-6 max-w-[900px] leading-relaxed;
+}
+
+.detail-header {
+  @apply mb-6 pb-4 border-b-[3px] border-accent;
+}
+
+.detail-header h2 {
+  @apply text-2xl font-bold my-2 text-txt;
+}
+
+.detail-path {
+  @apply text-sm text-txt-muted break-all font-mono;
+}
+
+/* Stat Row */
+.stat-row {
+  @apply flex flex-wrap gap-6 mb-4 py-3 bg-transparent border-none border-b-2 border-border;
+}
+
+.stat-item {
+  @apply flex flex-col gap-0.5 min-w-0;
+}
+
+.stat-item .stat-label {
+  @apply text-2xs font-semibold uppercase tracking-wider text-txt-muted m-0;
+}
+
+.stat-item .stat-value {
+  @apply text-sm font-medium text-txt max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap cursor-default;
+}
+
+.stat-item .stat-value:hover {
+  @apply whitespace-normal overflow-visible max-w-none;
+}
+
+/* Info Compact Grid */
+.info-compact {
+  @apply grid gap-x-6 gap-y-2;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.info-compact.companion-meta {
+  @apply mt-2 pt-2 border-t border-dashed border-border-muted;
+}
+
+/* Stored Hash List */
+.stored-hash-list {
+  @apply flex flex-col gap-1.5;
+}
+
+.sh-algo {
+  @apply text-xs font-bold text-accent uppercase min-w-[55px] shrink-0;
+}
+
+.sh-value {
+  @apply font-mono text-xs text-txt flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap bg-transparent p-0 select-all leading-relaxed;
+}
+
+.sh-value:hover {
+  @apply whitespace-normal break-all;
+}
+
+.sh-badge {
+  @apply text-xs px-1 py-px rounded font-semibold;
+}
+
+.sh-badge.ok {
+  @apply bg-success-soft text-success;
+}
+
+.sh-badge.fail {
+  @apply bg-error-soft text-error;
+}
+
+.sh-copy {
+  @apply bg-transparent border-none cursor-pointer text-sm px-1 py-0.5 rounded opacity-60 shrink-0;
+}
+
+.sh-copy:hover {
+  @apply bg-bg-hover opacity-100;
+}
+
+.sh-date {
+  @apply text-xs text-txt-muted whitespace-nowrap p-0 bg-transparent;
+}
+
+.sh-source {
+  @apply text-sm cursor-help shrink-0;
+}
+
+/* Hash Card */
+.hash-header {
+  @apply flex items-center gap-3 flex-wrap mb-2;
+}
+
+.hash-algo-label {
+  @apply text-sm font-bold text-success uppercase;
+}
+
+.hash-timestamp {
+  @apply text-xs text-txt-muted ml-auto;
+}
+
+.hash-full {
+  @apply block font-mono text-sm text-txt break-all leading-relaxed bg-transparent p-0 select-all;
+}
+
+.copy-btn {
+  @apply bg-transparent border-none text-sm cursor-pointer p-1 rounded;
+}
+
+.copy-btn:hover {
+  @apply bg-white/10;
+}
+
+/* Hash History */
+.hash-history-section {
+  @apply mt-0 py-4 bg-transparent border-none border-t border-border;
+}
+
+.hash-history-list {
+  @apply flex flex-col gap-1.5 max-h-52 overflow-y-auto;
+}
+
+.history-row {
+  @apply flex items-center gap-3 py-1.5 bg-transparent border-0 border-b border-dotted border-border-muted text-xs;
+}
+
+.history-row:last-child {
+  @apply border-b-0;
+}
+
+.history-row.verified {
+  @apply border-l-[3px] border-l-success pl-2.5;
+}
+
+.history-row.failed {
+  @apply border-l-[3px] border-l-error pl-2.5;
+}
+
+.hist-time {
+  @apply text-xs text-txt-muted min-w-[80px];
+}
+
+.hist-algo {
+  @apply text-xs font-bold text-accent uppercase min-w-[55px];
+}
+
+.hist-source {
+  @apply text-2xs px-2 py-0.5 bg-bg-hover rounded text-txt-muted;
+}
+
+.hist-hash {
+  @apply font-mono text-xs text-txt flex-1 bg-transparent p-0 select-all;
+}
+
+.hist-badge {
+  @apply text-xs px-1 py-px rounded font-semibold;
+}
+
+.hist-badge.ok {
+  @apply bg-success-soft text-success;
+}
+
+.hist-badge.fail {
+  @apply bg-error-soft text-error;
+}
+
+.hist-copy {
+  @apply bg-transparent border-none px-1 py-0.5 cursor-pointer text-2xs opacity-50;
+}
+
+.hist-copy:hover {
+  @apply opacity-100;
+}
+
+/* Segment Hashes */
+.segment-hashes-section,
+.computed-segments-section {
+  @apply mt-0 pt-4 border-t border-border;
+}
+
+.segment-hash-list {
+  @apply flex flex-col gap-1 max-h-64 overflow-y-auto;
+}
+
+.segment-hash-row {
+  @apply flex items-center gap-3 py-1.5 bg-transparent border-0 border-b border-dotted border-border-muted text-xs;
+}
+
+.segment-hash-row:last-child {
+  @apply border-b-0;
+}
+
+.segment-hash-row.verified {
+  @apply border-l-[3px] border-l-success pl-2.5;
+}
+
+.segment-hash-row.failed {
+  @apply border-l-[3px] border-l-error pl-2.5;
+}
+
+.seg-name {
+  @apply font-semibold text-txt min-w-[120px];
+}
+
+.seg-algo {
+  @apply text-2xs font-bold text-accent uppercase min-w-[45px];
+}
+
+.seg-hash {
+  @apply font-mono text-xs text-txt flex-1 bg-transparent p-0 select-all;
+}
+
+.seg-size {
+  @apply text-xs text-txt-muted min-w-[70px] text-right;
+}
+
+.seg-time {
+  @apply text-xs text-txt-muted min-w-[50px] text-right;
+}
+
+.seg-badge {
+  @apply text-xs px-1 py-px rounded font-semibold;
+}
+
+.seg-badge.ok {
+  @apply bg-success-soft text-success;
+}
+
+.seg-badge.fail {
+  @apply bg-error-soft text-error;
+}
+
+.seg-copy {
+  @apply bg-transparent border-none cursor-pointer text-xs px-1 py-0.5 rounded opacity-60;
+}
+
+.seg-copy:hover {
+  @apply bg-bg-hover opacity-100;
+}
+
+/* Verify Segments Button */
+.verify-segments-btn {
+  @apply text-xs px-2.5 py-1 bg-accent-soft text-accent border border-accent rounded cursor-pointer font-medium;
+}
+
+.verify-segments-btn:hover:not(:disabled) {
+  @apply bg-accent text-white;
+}
+
+.verify-segments-btn:disabled {
+  @apply opacity-50 cursor-not-allowed;
+}
+
+/* Tree List */
+.tree-filter {
+  @apply flex-1 max-w-[200px] px-2.5 py-1.5 bg-bg-panel border border-border rounded text-txt text-sm;
+}
+
+.tree-filter:focus {
+  @apply outline-none border-accent;
+}
+
+.tree-list {
+  @apply max-h-96 overflow-y-auto bg-bg-panel border border-border rounded;
+}
+
+.tree-list-compact {
+  @apply max-h-52 overflow-y-auto;
+}
+
+.tree-item {
+  @apply flex items-center gap-2 px-2.5 py-1.5 text-sm border-b border-border-muted;
+}
+
+.tree-item:last-child {
+  @apply border-b-0;
+}
+
+.tree-item.dir {
+  @apply text-accent;
+}
+
+.tree-item.file {
+  @apply text-txt;
+}
+
+.tree-icon {
+  @apply shrink-0 text-sm;
+}
+
+.tree-path {
+  @apply flex-1 min-w-0 truncate;
+}
+
+.tree-size {
+  @apply font-mono text-2xs text-txt-faint;
+}
+
+.tree-row {
+  @apply flex items-center gap-1.5 py-0.5 text-xs border-b border-border-muted;
+}
+
+.tree-row:last-child {
+  @apply border-b-0;
+}
+
+.tree-row.dir {
+  @apply text-accent;
+}
+
+.tree-truncated {
+  @apply px-3 py-3 text-center text-xs text-txt-muted bg-bg-hover;
+}
+
+/* Section Header Compact */
+.section-header-compact {
+  @apply flex items-center justify-between gap-2 mb-3;
+}
+
+.section-date {
+  @apply text-xs text-txt-muted font-normal;
+}
+
+.tree-filter-sm {
+  @apply px-2 py-1 bg-bg-card border border-border rounded text-txt text-xs w-32;
+}
+
+.tree-filter-sm:focus {
+  @apply outline-none border-accent;
+}
+
+/* Detail Actions */
+.detail-actions {
+  @apply flex gap-2.5 mt-6 pt-5 border-t border-border;
+}
+
+.detail-actions-compact {
+  @apply flex gap-2 mt-3 pt-3 border-t border-border;
+}
+
+.action-primary {
+  @apply px-4.5 py-2.5 bg-accent border-none rounded text-white text-base font-medium cursor-pointer transition-colors duration-150;
+}
+
+.action-primary:hover:not(:disabled) {
+  @apply bg-[#1a6fe8];
+}
+
+.action-primary:disabled {
+  @apply opacity-50 cursor-not-allowed;
+}
+
+.action-secondary {
+  @apply px-4.5 py-2.5 bg-transparent border border-border rounded text-txt text-base font-medium cursor-pointer;
+}
+
+.action-secondary:hover:not(:disabled) {
+  @apply bg-bg-hover border-txt-muted;
+}
+
+.action-btn-primary {
+  @apply px-3.5 py-2 bg-accent border-none rounded text-white text-sm font-medium cursor-pointer;
+}
+
+.action-btn-primary:hover:not(:disabled) {
+  @apply bg-[#1a6fe8];
+}
+
+.action-btn-primary:disabled {
+  @apply opacity-50 cursor-not-allowed;
+}
+
+.action-btn-secondary {
+  @apply px-3.5 py-2 bg-transparent border border-border rounded text-txt text-sm font-medium cursor-pointer;
+}
+
+.action-btn-secondary:hover:not(:disabled) {
+  @apply bg-bg-hover;
+}
+
+/* Hash Progress */
+.hash-progress-section {
+  @apply bg-accent-soft border border-accent rounded p-3 mb-4;
+}
+
+.hash-progress-header {
+  @apply flex justify-between items-center mb-2 text-sm text-accent font-medium;
+}
+
+.hash-progress-percent {
+  @apply font-mono font-semibold;
+}
+
+.hash-progress-bar {
+  @apply h-1.5 bg-accent/20 rounded overflow-hidden;
+}
+
+.hash-progress-fill {
+  @apply h-full bg-accent rounded transition-[width] duration-150 ease-out;
+}
+
+/* Segment Files */
+.segment-files-section {
+  @apply bg-bg-card border border-border rounded;
+}
+
+.segment-files-list {
+  @apply max-h-52 overflow-y-auto;
+}
+
+.segment-file-row {
+  @apply flex items-center gap-2 px-2 py-1 border-b border-border-muted text-xs;
+}
+
+.segment-file-row:last-child {
+  @apply border-b-0;
+}
+
+.segment-file-row .seg-num {
+  @apply font-mono text-2xs text-txt-faint min-w-[20px] text-right;
+}
+
+.segment-file-row .seg-filename {
+  @apply flex-1 font-mono text-txt truncate;
+}
+
+.segment-file-row .seg-filesize {
+  @apply font-mono text-2xs text-accent min-w-[70px] text-right;
+}
+
+/* Info Note */
+.info-note-section {
+  @apply flex items-start gap-2 px-3 py-2.5 bg-bg-card border border-border rounded my-2;
+}
+
+.info-note-icon {
+  @apply text-sm shrink-0;
+}
+
+.info-note-text {
+  @apply text-sm text-txt-muted leading-relaxed;
+}
+
+/* UFED Styles */
+.info-compact.ufed-details {
+  @apply mt-2 pt-2 border-t border-dashed border-accent;
+}
+
+.info-row.section-header {
+  @apply mt-2 pt-2 border-t border-dashed border-border-muted;
+}
+
+.info-row.section-header .info-label {
+  @apply font-semibold text-accent;
+}
+
+.info-compact.ufed-files-box,
+.info-compact.ufed-hashes-box {
+  @apply mt-3 p-0 bg-bg-card border border-border-muted rounded overflow-hidden;
+}
+
+.box-header {
+  @apply flex items-center gap-2 px-3 py-2 bg-bg-panel border-b border-border-muted text-sm font-semibold;
+}
+
+.box-icon {
+  @apply text-sm;
+}
+
+.box-title {
+  @apply flex-1 text-txt;
+}
+
+.box-count {
+  @apply text-2xs font-semibold px-2 py-0.5 rounded-full bg-accent-soft text-accent;
+}
+
+.ufed-files-box .associated-files-list,
+.ufed-hashes-box .ufed-hashes-list {
+  @apply max-h-52 overflow-y-auto m-0 p-0 bg-transparent;
+}
+
+.associated-file-row {
+  @apply flex items-center gap-2 px-3 py-2 text-xs border-b border-border-muted;
+}
+
+.associated-file-row:last-child {
+  @apply border-b-0;
+}
+
+.associated-file-row:hover {
+  @apply bg-bg-panel;
+}
+
+.af-type {
+  @apply text-[9px] font-semibold px-1.5 py-0.5 rounded bg-bg-panel text-txt-muted uppercase min-w-[40px] text-center;
+}
+
+.af-type.zip {
+  @apply bg-accent-soft text-accent;
+}
+
+.af-type.ufd,
+.af-type.ufdr,
+.af-type.ufdx {
+  @apply bg-warning-soft text-warning;
+}
+
+.af-type.pdf {
+  @apply bg-error-soft text-error;
+}
+
+.af-name {
+  @apply flex-1 truncate font-mono text-xs;
+}
+
+.af-size {
+  @apply font-mono text-2xs text-txt-faint min-w-[60px] text-right;
+}
+
+.af-note {
+  @apply text-[9px] text-txt-muted italic;
+}
+
+.af-hash-icon {
+  @apply text-2xs text-success;
+}
+
+.ufed-hash-row {
+  @apply flex items-center gap-2 px-3 py-2 text-xs border-b border-border-muted;
+}
+
+.ufed-hash-row:last-child {
+  @apply border-b-0;
+}
+
+.ufed-hash-row:hover {
+  @apply bg-bg-panel;
+}
+
+.ufed-hash-algo {
+  @apply text-[9px] font-semibold px-1.5 py-0.5 rounded bg-success-soft text-success uppercase min-w-[50px] text-center;
+}
+
+.ufed-hash-file {
+  @apply min-w-[120px] max-w-[180px] truncate text-2xs text-txt-muted;
+}
+
+.ufed-hash-value {
+  @apply flex-1 font-mono text-2xs text-txt truncate;
+}
+
+.ufed-hash-copy {
+  @apply bg-transparent border-none cursor-pointer text-xs opacity-50 px-1 py-0.5;
+}
+
+.ufed-hash-copy:hover {
+  @apply opacity-100;
+}
+
+/* Scan Progress */
+.scan-progress {
+  @apply flex items-center gap-2 px-3 py-2.5 bg-warning-soft border-b border-warning;
+}
+
+.scan-progress .scan-icon {
+  @apply text-sm animate-spin-slow;
+}
+
+.scan-progress .scan-text {
+  @apply text-sm text-warning font-medium;
+}
+
+/* Verification Detail */
+.verification-detail {
+  @apply text-2xs mt-1.5 px-2 py-1 bg-success-soft rounded text-success;
+}
+
+.verification-detail.error {
+  @apply bg-error-soft text-error font-medium;
+}
+
+.verification-detail.neutral {
+  @apply bg-bg-panel text-txt-muted;
+}
+
+/* Action Button Small */
+.action-btn {
+  @apply w-[22px] h-[22px] flex items-center justify-center bg-transparent border border-transparent rounded text-xs text-txt-muted cursor-pointer;
+}
+
+.action-btn:hover:not(:disabled) {
+  @apply bg-bg-card border-border text-txt;
+}
+
+/* Clear Filter Button */
+.clear-filter-btn {
+  @apply mt-3 px-3 py-1.5 rounded bg-bg-hover text-txt-muted border border-border-muted cursor-pointer text-sm;
+}
+
+.clear-filter-btn:hover {
+  @apply bg-accent-soft text-accent border-accent;
+}
+
+/* ============================================================================
+ * HEX VIEWER STYLES
+ * ============================================================================ */
+
+.hex-viewer {
+  @apply flex flex-col h-full bg-bg font-mono text-sm outline-none;
+}
+
+.hex-toolbar {
+  @apply flex items-center justify-between py-2 px-3 bg-bg-panel border-b border-border gap-4 flex-wrap;
+}
+
+.hex-toolbar-left,
+.hex-toolbar-center,
+.hex-toolbar-right {
+  @apply flex items-center gap-2;
+}
+
+.hex-file-type {
+  @apply px-2 py-0.5 bg-accent text-white rounded text-2xs font-medium cursor-help;
+}
+
+.hex-file-size {
+  @apply text-txt-muted text-xs;
+}
+
+.hex-nav-btn {
+  @apply px-2 py-1 bg-bg-card text-txt border border-border rounded cursor-pointer text-xs transition-colors;
+}
+
+.hex-nav-btn:hover:not(:disabled) {
+  @apply bg-bg-hover;
+}
+
+.hex-nav-btn:disabled {
+  @apply opacity-40 cursor-not-allowed;
+}
+
+.hex-offset-display {
+  @apply px-3 py-1 bg-bg border border-border rounded text-xs text-txt-muted min-w-[200px] text-center;
+}
+
+.hex-goto-input {
+  @apply w-[140px] px-2 py-1 bg-bg text-txt border border-border rounded font-mono text-xs;
+}
+
+.hex-goto-input::placeholder {
+  @apply text-txt-muted;
+}
+
+.hex-goto-input:focus {
+  @apply outline-none border-accent;
+}
+
+.hex-goto-btn {
+  @apply px-3 py-1 bg-accent text-white border-none rounded cursor-pointer text-xs transition-colors;
+}
+
+.hex-goto-btn:hover {
+  @apply bg-accent/80;
+}
+
+.hex-option {
+  @apply flex items-center gap-1 text-2xs text-txt-muted cursor-pointer select-none;
+}
+
+.hex-option input[type="checkbox"] {
+  @apply accent-accent;
+}
+
+.hex-chunk-select {
+  @apply px-2 py-1 bg-bg text-txt border border-border rounded text-2xs cursor-pointer;
+}
+
+.hex-legend {
+  @apply flex flex-wrap gap-3 py-1.5 px-3 bg-bg-panel border-b border-border text-2xs;
+}
+
+.hex-legend-item {
+  @apply flex items-center gap-1 cursor-help;
+}
+
+.hex-legend-color {
+  @apply w-3 h-3 rounded-sm;
+}
+
+.hex-error {
+  @apply p-3 mx-3 my-2 bg-error-soft border border-error/30 rounded text-xs;
+  color: var(--error, #f85149);
+}
+
+.hex-loading {
+  @apply flex items-center justify-center p-10 text-txt-muted;
+}
+
+.hex-empty {
+  @apply flex items-center justify-center flex-1 text-txt-muted italic;
+}
+
+.hex-content {
+  @apply flex-1 overflow-auto py-2;
+}
+
+.hex-header {
+  @apply flex py-1 px-3 border-b border-border mb-1 sticky top-0 bg-bg z-10;
+}
+
+.hex-address-header {
+  @apply w-20 text-txt-muted text-2xs uppercase;
+}
+
+.hex-bytes-header {
+  @apply flex-1 flex gap-1;
+}
+
+.hex-col-header {
+  @apply w-[22px] text-center text-txt-muted text-[10px];
+}
+
+.hex-ascii-header {
+  @apply w-40 text-center text-txt-muted text-2xs uppercase border-l border-border ml-2 pl-2;
+}
+
+.hex-lines {
+  @apply flex flex-col;
+}
+
+.hex-line {
+  @apply flex py-px px-3 transition-colors;
+}
+
+.hex-line:hover {
+  @apply bg-accent/5;
+}
+
+.hex-address {
+  @apply w-20 text-accent text-xs opacity-80;
+}
+
+.hex-bytes {
+  @apply flex-1 flex gap-1;
+}
+
+.hex-byte {
+  @apply w-[22px] text-center py-px px-0.5 rounded-sm cursor-default transition-all;
+}
+
+.hex-byte:hover {
+  @apply bg-accent/20;
+}
+
+.hex-byte.highlighted {
+  @apply font-medium;
+}
+
+.hex-byte-empty {
+  @apply opacity-30;
+}
+
+.hex-ascii {
+  @apply w-40 border-l border-border ml-2 pl-2 flex;
+}
+
+.hex-ascii-char {
+  @apply w-2.5 text-center py-px rounded-sm transition-colors;
+}
+
+.hex-ascii-char:hover {
+  @apply bg-accent/20;
+}
+
+.hex-ascii-char.highlighted {
+  @apply font-medium;
+}
+
+/* ============================================================================
+ * TEXT VIEWER STYLES
+ * ============================================================================ */
+
+.text-viewer {
+  @apply flex flex-col h-full bg-bg font-mono;
+}
+
+.text-toolbar {
+  @apply flex items-center justify-between py-2 px-3 bg-bg-panel border-b border-border gap-4 flex-wrap;
+}
+
+.text-toolbar-left,
+.text-toolbar-center,
+.text-toolbar-right {
+  @apply flex items-center gap-3;
+}
+
+.text-language {
+  @apply px-2 py-0.5 bg-accent text-white rounded text-2xs font-medium lowercase;
+}
+
+.text-file-size,
+.text-line-count {
+  @apply text-2xs text-txt-muted;
+}
+
+.text-search {
+  @apply flex items-center gap-1 bg-bg border border-border rounded p-0.5;
+}
+
+.text-search-input {
+  @apply w-[180px] px-2 py-1 bg-transparent text-txt border-none font-mono text-xs;
+}
+
+.text-search-input::placeholder {
+  @apply text-txt-muted;
+}
+
+.text-search-input:focus {
+  @apply outline-none;
+}
+
+.text-search-count {
+  @apply text-2xs text-txt-muted px-2;
+}
+
+.text-search-btn {
+  @apply px-1.5 py-0.5 bg-transparent text-txt-muted border-none cursor-pointer text-[10px] transition-colors;
+}
+
+.text-search-btn:hover {
+  @apply text-txt;
+}
+
+.text-option {
+  @apply flex items-center gap-1 text-2xs text-txt-muted cursor-pointer select-none;
+}
+
+.text-option input[type="checkbox"] {
+  @apply accent-accent;
+}
+
+.text-font-size {
+  @apply flex items-center gap-1 text-2xs text-txt-muted;
+}
+
+.text-font-btn {
+  @apply w-5 h-5 p-0 bg-bg-card text-txt border border-border rounded cursor-pointer text-sm leading-none transition-colors;
+}
+
+.text-font-btn:hover {
+  @apply bg-bg-hover;
+}
+
+.text-error {
+  @apply p-3 mx-3 my-2 bg-error-soft border border-error/30 rounded text-xs;
+  color: var(--error, #f85149);
+}
+
+.text-loading {
+  @apply flex items-center justify-center p-10 text-txt-muted;
+}
+
+.text-empty {
+  @apply flex items-center justify-center flex-1 text-txt-muted italic;
+}
+
+.text-content {
+  @apply flex-1 flex overflow-auto;
+}
+
+.text-content.word-wrap .text-code {
+  @apply whitespace-pre-wrap break-words;
+}
+
+.text-line-numbers {
+  @apply shrink-0 py-2 bg-bg-panel border-r border-border text-right select-none sticky left-0;
+}
+
+.text-line-number {
+  @apply px-3 text-txt-muted leading-relaxed;
+}
+
+.text-code {
+  @apply flex-1 m-0 py-2 px-3 whitespace-pre overflow-visible leading-relaxed;
+}
+
+.text-code code {
+  @apply font-mono;
+}
+
+.text-truncation-warning {
+  @apply py-2 px-3 bg-warning-soft border-t border-warning/30 text-warning text-2xs text-center;
+}
+
+/* ============================================================================
+ * METADATA PANEL STYLES
+ * ============================================================================ */
+
+.metadata-panel {
+  @apply flex flex-col h-full bg-bg text-sm overflow-auto;
+}
+
+.metadata-empty {
+  @apply flex flex-col items-center justify-center py-10 px-5 text-center h-full;
+}
+
+.metadata-empty-icon {
+  @apply text-4xl mb-3 opacity-50;
+}
+
+.metadata-empty-text {
+  @apply text-txt-muted text-sm mb-2;
+}
+
+.metadata-empty-hint {
+  @apply text-txt-muted text-2xs max-w-[200px];
+}
+
+.metadata-header {
+  @apply flex flex-col gap-1 p-3 bg-bg-panel border-b border-border;
+}
+
+.metadata-format {
+  @apply text-sm font-semibold text-accent;
+}
+
+.metadata-version {
+  @apply text-2xs text-txt-muted ml-2;
+}
+
+.metadata-section {
+  @apply border-b border-border;
+}
+
+.metadata-section-header {
+  @apply flex items-center gap-2 py-2.5 px-3 bg-bg-panel cursor-pointer select-none transition-colors;
+}
+
+.metadata-section-header:hover {
+  @apply bg-bg-hover;
+}
+
+.metadata-section-toggle {
+  @apply text-[10px] text-txt-muted w-3;
+}
+
+.metadata-section-title {
+  @apply font-medium text-txt;
+}
+
+.metadata-fields {
+  @apply py-2;
+}
+
+.metadata-group {
+  @apply mb-3 last:mb-0;
+}
+
+.metadata-group-header {
+  @apply flex items-center gap-2 py-1.5 px-3 text-2xs font-semibold text-txt-muted uppercase tracking-wide;
+}
+
+.metadata-group-color {
+  @apply w-2.5 h-2.5 rounded-sm;
+}
+
+.metadata-group-fields {
+  @apply px-2;
+}
+
+.metadata-field {
+  @apply flex flex-col p-2 my-0.5 bg-bg-panel rounded transition-colors;
+}
+
+.metadata-field:hover {
+  @apply bg-bg-hover;
+}
+
+.metadata-field-header {
+  @apply flex justify-between items-center mb-1;
+}
+
+.metadata-field-name {
+  @apply font-medium text-txt;
+}
+
+.metadata-field-value {
+  @apply font-mono text-2xs text-txt-muted break-all py-1 px-1.5 bg-bg rounded;
+}
+
+.metadata-regions {
+  @apply p-2;
+}
+
+.metadata-region {
+  @apply flex items-center gap-2 py-1.5 px-2 my-0.5 bg-bg-panel rounded cursor-pointer transition-colors;
+}
+
+.metadata-region:hover {
+  @apply bg-bg-hover;
+}
+
+.metadata-region-color {
+  @apply w-3 h-3 rounded shrink-0;
+}
+
+.metadata-region-name {
+  @apply flex-1 font-medium;
+}
+
+.metadata-region-range {
+  @apply font-mono text-[10px] text-txt-muted;
+}
+
+.metadata-region-size {
+  @apply text-[10px] text-txt-muted min-w-[45px] text-right;
+}
+

@@ -6,35 +6,72 @@ use std::io::{Read, Seek, SeekFrom};
 use std::time::SystemTime;
 use chrono::{Local, NaiveDateTime, TimeZone};
 use filetime::FileTime;
+use tracing::trace;
 
 use super::types::*;
 use crate::common::binary::{read_u32_at, read_u64_at, read_string_at};
 
-/// Get list of segment file names for an AD1 container
-pub fn get_segment_files(path: &str, segment_count: u32) -> Vec<String> {
+/// Get segment files with their sizes and track missing segments
+/// Returns (segment_names, segment_sizes, total_size, missing_segments)
+pub fn get_segment_files_with_sizes(path: &str, segment_count: u32) -> (Vec<String>, Vec<u64>, u64, Vec<String>) {
     let path_obj = Path::new(path);
     let parent = path_obj.parent();
     let stem = path_obj.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     
-    let mut segments = Vec::new();
+    let mut segment_names = Vec::new();
+    let mut segment_sizes = Vec::new();
+    let mut missing_segments = Vec::new();
+    let mut total_size = 0u64;
+    
     for i in 1..=segment_count {
         let segment_name = format!("{}.ad{}", stem, i);
-        // Check if file exists
         if let Some(parent_dir) = parent {
             let segment_path = parent_dir.join(&segment_name);
             if segment_path.exists() {
-                segments.push(segment_name);
+                segment_names.push(segment_name);
+                if let Ok(metadata) = std::fs::metadata(&segment_path) {
+                    let size = metadata.len();
+                    segment_sizes.push(size);
+                    total_size += size;
+                } else {
+                    segment_sizes.push(0);
+                }
+            } else {
+                missing_segments.push(segment_name);
             }
-        } else {
-            segments.push(segment_name);
         }
     }
-    segments
+    
+    (segment_names, segment_sizes, total_size, missing_segments)
 }
 
-/// Validate AD1 file and check all segments exist
+/// Validate AD1 file format (does not check segments)
+pub fn validate_format(path: &str) -> Result<(), String> {
+    let path_obj = Path::new(path);
+    if !path_obj.exists() {
+        return Err(format!("Input file not found: {path}"));
+    }
+
+    let mut file = File::open(path_obj)
+        .map_err(|e| format!("Failed to open input file: {e}"))?;
+    let mut signature = [0u8; 16];
+    file.read_exact(&mut signature)
+        .map_err(|e| format!("Failed to read file signature: {e}"))?;
+    if &signature[..15] != AD1_SIGNATURE {
+        return Err("File is not an AD1 segmented image".to_string());
+    }
+
+    let segment_count = read_u32_at(&mut file, 0x1c)?;
+    if segment_count == 0 {
+        return Err("Invalid AD1 segment count".to_string());
+    }
+
+    Ok(())
+}
+
+/// Validate AD1 file and check all segments exist (strict validation)
 pub fn validate_input(path: &str) -> Result<(), String> {
     let path_obj = Path::new(path);
     if !path_obj.exists() {
@@ -235,11 +272,31 @@ pub fn parse_timestamp(value: &str) -> Option<FileTime> {
 
 /// Find hash value in metadata
 pub fn find_hash(metadata: &[Metadata], key: u32) -> Option<String> {
+    // Debug: log all hash-related metadata entries
+    for meta in metadata {
+        if meta.category == HASH_INFO {
+            let value = metadata_string(&meta.data);
+            trace!(
+                category = meta.category,
+                key = format!("0x{:04x}", meta.key),
+                expected_key = format!("0x{:04x}", key),
+                value = %value,
+                "Found hash metadata entry"
+            );
+        }
+    }
+    
     metadata
         .iter()
         .find(|meta| meta.category == HASH_INFO && meta.key == key)
         .map(|meta| metadata_string(&meta.data))
-        .map(|value| value.to_lowercase())
+        .map(|value| {
+            // Clean up the hash value - remove any whitespace or non-hex characters
+            let cleaned: String = value.chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .collect();
+            cleaned.to_lowercase()
+        })
 }
 
 /// Collect tree entries recursively
@@ -341,7 +398,7 @@ pub fn parse_companion_log(ad1_path: &str) -> Option<CompanionLogInfo> {
     let mut notes_lines: Vec<String> = Vec::new();
     let mut in_notes = false;
     
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         let line_lower = line.to_lowercase();
         
         // Parse key-value pairs

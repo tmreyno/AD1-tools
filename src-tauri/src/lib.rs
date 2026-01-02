@@ -8,8 +8,10 @@
 //! | Format | Module    | Description                                    |
 //! |--------|-----------|------------------------------------------------|
 //! | AD1    | `ad1`     | AccessData Logical Image (FTK)                 |
-//! | E01    | `ewf`     | Expert Witness Format / EnCase                 |
-//! | L01    | `l01`     | EnCase Logical Evidence File                   |
+//! | E01    | `ewf`     | Expert Witness Format / EnCase (physical)      |
+//! | L01    | `ewf`     | EnCase Logical Evidence File                   |
+//! | Ex01   | `ewf`     | Expert Witness Format v2 (physical)            |
+//! | Lx01   | `ewf`     | EnCase Logical Evidence v2                     |
 //! | RAW    | `raw`     | dd-style images (.dd, .raw, .img, .001)        |
 //! | 7z     | `archive` | 7-Zip archives (metadata only)                 |
 //! | ZIP    | `archive` | ZIP/ZIP64 archives (metadata only)             |
@@ -67,15 +69,17 @@
 //! - Companion log parsing for chain-of-custody metadata
 //! - Byte-accurate extraction preserving timestamps
 
-mod ad1;
+pub mod ad1;  // AccessData Logical Image (FTK)
 pub mod archive;  // Archive formats (7z, ZIP, RAR, etc.)
 pub mod common;  // Shared utilities (hash, binary, segments)
-pub mod ewf;  // Expert Witness Format (E01/EWF/Ex01) parser
-mod l01;
+pub mod database;  // SQLite persistence layer
+pub mod ewf;  // Expert Witness Format (E01/L01/Ex01/Lx01) parser
 pub mod logging;  // Logging and tracing configuration
+pub mod project;  // Project file handling (.ffxproj)
 pub mod raw;  // Raw disk images (.dd, .raw, .img, .001, etc.)
-pub mod ufed;  // Cellebrite UFED containers (UFD, UFDR, UFDX)
-mod containers;
+pub mod ufed;  // UFED containers (UFD, UFDR, UFDX)
+pub mod viewer;  // Hex/text file viewer
+pub mod containers;  // Container abstraction layer
 
 use tauri::Emitter;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
@@ -109,6 +113,32 @@ fn logical_verify(
     algorithm: String,
 ) -> Result<Vec<containers::VerifyEntry>, String> {
     containers::verify(&inputPath, &algorithm)
+}
+
+/// Hash all AD1 segment files to produce a single hash of the container image.
+/// This is different from logical_verify which verifies internal file hashes.
+#[tauri::command]
+async fn ad1_hash_segments(
+    #[allow(non_snake_case)]
+    inputPath: String,
+    algorithm: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let path_for_closure = inputPath.clone();
+    // Run on blocking thread pool to prevent UI freeze
+    tauri::async_runtime::spawn_blocking(move || {
+        ad1::hash_segments_with_progress(&inputPath, &algorithm, |current, total| {
+            let percent = if total > 0 { (current as f64 / total as f64) * 100.0 } else { 0.0 };
+            let _ = app.emit("verify-progress", VerifyProgress {
+                path: path_for_closure.clone(),
+                current: current as usize,
+                total: total as usize,
+                percent,
+            });
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -172,12 +202,12 @@ async fn scan_directory_streaming(
     result
 }
 
-// EWF Commands - Expert Witness Format implementation
+// EWF Commands - Expert Witness Format implementation (E01/L01/Ex01/Lx01)
 #[tauri::command]
 async fn e01_v3_info(
     #[allow(non_snake_case)]
     inputPath: String,
-) -> Result<ewf::E01Info, String> {
+) -> Result<ewf::EwfInfo, String> {
     // Run on blocking thread pool to prevent UI freeze during file parsing
     tauri::async_runtime::spawn_blocking(move || {
         ewf::info(&inputPath)
@@ -188,6 +218,7 @@ async fn e01_v3_info(
 
 #[derive(Clone, serde::Serialize)]
 struct VerifyProgress {
+    path: String,
     current: usize,
     total: usize,
     percent: f64,
@@ -200,11 +231,13 @@ async fn e01_v3_verify(
     algorithm: String,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    let path_for_closure = inputPath.clone();
     // Run on blocking thread pool to prevent UI freeze
     tauri::async_runtime::spawn_blocking(move || {
         ewf::verify_with_progress(&inputPath, &algorithm, |current, total| {
             let percent = (current as f64 / total as f64) * 100.0;
             let _ = app.emit("verify-progress", VerifyProgress {
+                path: path_for_closure.clone(),
                 current,
                 total,
                 percent,
@@ -235,10 +268,12 @@ async fn raw_verify(
     algorithm: String,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    let path_for_closure = inputPath.clone();
     tauri::async_runtime::spawn_blocking(move || {
         raw::verify_with_progress(&inputPath, &algorithm, |current, total| {
             let percent = (current as f64 / total as f64) * 100.0;
             let _ = app.emit("verify-progress", VerifyProgress {
+                path: path_for_closure.clone(),
                 current: current as usize,
                 total: total as usize,
                 percent,
@@ -736,14 +771,26 @@ async fn batch_hash(
                         progress_total.store(total as usize, std::sync::atomic::Ordering::Relaxed);
                         progress_current.store(current as usize, std::sync::atomic::Ordering::Relaxed);
                     })
-                } else {
-                    // AD1/L01 - use container verify
+                } else if container_for_hash.contains("ad1") {
+                    // AD1 containers - hash the segment files (image-level hash)
+                    ad1::hash_segments_with_progress(&path_for_hash, &algo_for_hash, |current: u64, total: u64| {
+                        progress_total.store(total as usize, std::sync::atomic::Ordering::Relaxed);
+                        progress_current.store(current as usize, std::sync::atomic::Ordering::Relaxed);
+                    })
+                } else if container_for_hash.contains("l01") {
+                    // L01 containers - verify and return hash from message
                     containers::verify(&path_for_hash, &algo_for_hash)
                         .map(|entries| {
                             entries.first()
                                 .and_then(|e| e.message.clone())
-                                .unwrap_or_default()
+                                .unwrap_or_else(|| "Verified".to_string())
                         })
+                } else {
+                    // Unknown - try raw verification
+                    raw::verify_with_progress(&path_for_hash, &algo_for_hash, |current: u64, total: u64| {
+                        progress_total.store(total as usize, std::sync::atomic::Ordering::Relaxed);
+                        progress_current.store(current as usize, std::sync::atomic::Ordering::Relaxed);
+                    })
                 };
                 
                 // Stop progress thread
@@ -890,9 +937,13 @@ fn collect_system_stats() -> SystemStats {
     // Get app-specific stats
     let pid = sysinfo::Pid::from_u32(std::process::id());
     let (app_cpu_usage, app_memory, app_threads) = if let Some(process) = sys.process(pid) {
-        (process.cpu_usage(), process.memory(), process.tasks().map(|t| t.len()).unwrap_or(1))
+        // process.tasks() is not supported on macOS, use rayon thread count as worker threads
+        let threads = process.tasks()
+            .map(|t| t.len())
+            .unwrap_or_else(|| rayon::current_num_threads());
+        (process.cpu_usage(), process.memory(), threads)
     } else {
-        (0.0, 0, 1)
+        (0.0, 0, rayon::current_num_threads())
     };
     
     let cpu_cores = sys.cpus().len();
@@ -914,6 +965,339 @@ fn get_system_stats() -> SystemStats {
     collect_system_stats()
 }
 
+// =============================================================================
+// Data Viewing & Analysis Commands
+// =============================================================================
+
+/// Read raw bytes from a file at specified offset
+/// 
+/// Returns up to `length` bytes starting at `offset`.
+/// Useful for previewing file contents without full extraction.
+#[tauri::command]
+fn read_file_bytes(
+    path: String,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, String> {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    
+    let mut file = File::open(&path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    
+    let file_size = file.metadata()
+        .map_err(|e| format!("Failed to get file size: {}", e))?
+        .len();
+    
+    if offset >= file_size {
+        return Ok(Vec::new());
+    }
+    
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("Failed to seek: {}", e))?;
+    
+    let read_len = length.min((file_size - offset) as usize);
+    let mut buffer = vec![0u8; read_len];
+    
+    file.read_exact(&mut buffer)
+        .map_err(|e| format!("Failed to read: {}", e))?;
+    
+    Ok(buffer)
+}
+
+/// Get hex dump of file contents
+///
+/// Reads bytes from file and returns formatted hex dump string.
+#[tauri::command]
+fn hex_dump(
+    path: String,
+    offset: u64,
+    length: usize,
+    #[allow(non_snake_case)]
+    showAscii: Option<bool>,
+    #[allow(non_snake_case)]
+    bytesPerLine: Option<usize>,
+) -> Result<common::hex::HexDumpResult, String> {
+    let data = read_file_bytes(path, offset, length)?;
+    
+    let options = common::hex::HexDumpOptions {
+        show_ascii: showAscii.unwrap_or(true),
+        bytes_per_line: bytesPerLine.unwrap_or(16),
+        show_offset: true,
+        uppercase: true,
+        group_size: 1,
+        start_offset: offset,
+    };
+    
+    Ok(common::hex::create_hex_dump(&data, &options))
+}
+
+/// Detect file type from magic signature
+///
+/// Reads file header and identifies type based on magic bytes.
+/// Returns None if file type cannot be determined.
+#[tauri::command]
+fn detect_file_type(path: String) -> Result<Option<common::magic::FileType>, String> {
+    // Read first 64 bytes for magic detection
+    let header = read_file_bytes(path, 0, 64)?;
+    Ok(common::magic::detect_file_type(&header))
+}
+
+/// Analyze entropy of a file or portion of a file
+///
+/// Returns entropy statistics useful for detecting encryption.
+#[tauri::command]
+fn analyze_file_entropy(
+    path: String,
+    offset: Option<u64>,
+    length: Option<usize>,
+) -> Result<common::entropy::EntropyResult, String> {
+    let start = offset.unwrap_or(0);
+    // Default to 1MB sample for entropy analysis
+    let len = length.unwrap_or(1024 * 1024);
+    
+    let data = read_file_bytes(path, start, len)?;
+    
+    Ok(common::entropy::EntropyResult::new(&data)
+        .with_offset(start))
+}
+
+/// Analyze entropy across file blocks
+///
+/// Useful for finding encrypted regions in disk images.
+#[tauri::command]
+fn analyze_entropy_blocks(
+    path: String,
+    #[allow(non_snake_case)]
+    blockSize: Option<usize>,
+    #[allow(non_snake_case)]
+    maxBlocks: Option<usize>,
+) -> Result<common::entropy::BlockEntropyAnalysis, String> {
+    use std::fs::File;
+    use std::io::Read;
+    
+    let block_size = blockSize.unwrap_or(4096);
+    let max_blocks = maxBlocks.unwrap_or(1000);
+    
+    let mut file = File::open(&path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+    
+    let file_size = file.metadata()
+        .map_err(|e| format!("Failed to get file size: {}", e))?
+        .len();
+    
+    // Limit data read to prevent memory issues
+    let max_bytes = block_size * max_blocks;
+    let read_len = (file_size as usize).min(max_bytes);
+    
+    let mut data = vec![0u8; read_len];
+    file.read_exact(&mut data)
+        .map_err(|e| format!("Failed to read: {}", e))?;
+    
+    Ok(common::entropy::analyze_blocks(&data, block_size))
+}
+
+/// Compare two hash values
+///
+/// Returns detailed comparison result including case-sensitivity.
+#[tauri::command]
+fn compare_hashes(
+    hash1: String,
+    hash2: String,
+) -> common::hash::HashMatchResult {
+    common::hash::compare_hashes(&hash1, &hash2)
+}
+
+/// Verify a file's hash against expected value
+#[tauri::command]
+fn verify_file_hash(
+    path: String,
+    expected: String,
+    algorithm: String,
+) -> Result<common::hash::HashVerificationResult, String> {
+    let algo = common::hash::HashAlgorithm::from_str(&algorithm)?;
+    common::hash::verify_file_hash(std::path::Path::new(&path), &expected, algo)
+}
+
+// ============================================================================
+// Database Commands
+// ============================================================================
+
+/// Get or create a session for a directory path
+#[tauri::command]
+fn db_get_or_create_session(root_path: String) -> Result<database::Session, String> {
+    let db = database::get_db();
+    db.get_or_create_session(&root_path).map_err(|e| e.to_string())
+}
+
+/// Get recent sessions
+#[tauri::command]
+fn db_get_recent_sessions(limit: i32) -> Result<Vec<database::Session>, String> {
+    let db = database::get_db();
+    db.get_recent_sessions(limit).map_err(|e| e.to_string())
+}
+
+/// Get the last opened session
+#[tauri::command]
+fn db_get_last_session() -> Result<Option<database::Session>, String> {
+    let db = database::get_db();
+    db.get_last_session().map_err(|e| e.to_string())
+}
+
+/// Save or update a file record
+#[tauri::command]
+fn db_upsert_file(file: database::FileRecord) -> Result<(), String> {
+    let db = database::get_db();
+    db.upsert_file(&file).map_err(|e| e.to_string())
+}
+
+/// Get all files for a session
+#[tauri::command]
+fn db_get_files_for_session(session_id: String) -> Result<Vec<database::FileRecord>, String> {
+    let db = database::get_db();
+    db.get_files_for_session(&session_id).map_err(|e| e.to_string())
+}
+
+/// Get a file by path
+#[tauri::command]
+fn db_get_file_by_path(session_id: String, path: String) -> Result<Option<database::FileRecord>, String> {
+    let db = database::get_db();
+    db.get_file_by_path(&session_id, &path).map_err(|e| e.to_string())
+}
+
+/// Insert a hash record
+#[tauri::command]
+fn db_insert_hash(hash: database::HashRecord) -> Result<(), String> {
+    let db = database::get_db();
+    db.insert_hash(&hash).map_err(|e| e.to_string())
+}
+
+/// Get all hashes for a file
+#[tauri::command]
+fn db_get_hashes_for_file(file_id: String) -> Result<Vec<database::HashRecord>, String> {
+    let db = database::get_db();
+    db.get_hashes_for_file(&file_id).map_err(|e| e.to_string())
+}
+
+/// Get the latest hash for a file/algorithm/segment combo
+#[tauri::command]
+fn db_get_latest_hash(
+    file_id: String,
+    algorithm: String,
+    segment_index: Option<i32>,
+) -> Result<Option<database::HashRecord>, String> {
+    let db = database::get_db();
+    db.get_latest_hash(&file_id, &algorithm, segment_index).map_err(|e| e.to_string())
+}
+
+/// Insert a verification record
+#[tauri::command]
+fn db_insert_verification(verification: database::VerificationRecord) -> Result<(), String> {
+    let db = database::get_db();
+    db.insert_verification(&verification).map_err(|e| e.to_string())
+}
+
+/// Get verifications for a file
+#[tauri::command]
+fn db_get_verifications_for_file(file_id: String) -> Result<Vec<database::VerificationRecord>, String> {
+    let db = database::get_db();
+    db.get_verifications_for_file(&file_id).map_err(|e| e.to_string())
+}
+
+/// Save open tabs for a session
+#[tauri::command]
+fn db_save_open_tabs(session_id: String, tabs: Vec<database::OpenTabRecord>) -> Result<(), String> {
+    let db = database::get_db();
+    db.save_open_tabs(&session_id, &tabs).map_err(|e| e.to_string())
+}
+
+/// Get open tabs for a session
+#[tauri::command]
+fn db_get_open_tabs(session_id: String) -> Result<Vec<database::OpenTabRecord>, String> {
+    let db = database::get_db();
+    db.get_open_tabs(&session_id).map_err(|e| e.to_string())
+}
+
+/// Set a setting value
+#[tauri::command]
+fn db_set_setting(key: String, value: String) -> Result<(), String> {
+    let db = database::get_db();
+    db.set_setting(&key, &value).map_err(|e| e.to_string())
+}
+
+/// Get a setting value
+#[tauri::command]
+fn db_get_setting(key: String) -> Result<Option<String>, String> {
+    let db = database::get_db();
+    db.get_setting(&key).map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// Project File Commands
+// ============================================================================
+
+/// Get the default project file path for a root directory
+#[tauri::command]
+fn project_get_default_path(root_path: String) -> String {
+    project::get_default_project_path(&root_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Check if a project file exists for the given root directory
+#[tauri::command]
+fn project_check_exists(root_path: String) -> Option<String> {
+    project::check_project_exists(&root_path)
+}
+
+/// Save a project to the specified path (or default if not provided)
+#[tauri::command]
+fn project_save(project: project::FFXProject, path: Option<String>) -> project::ProjectSaveResult {
+    let mut proj = project;
+    proj.touch(); // Update saved_at timestamp
+    project::save_project(&proj, path.as_deref())
+}
+
+/// Load a project from the specified path
+#[tauri::command]
+fn project_load(path: String) -> project::ProjectLoadResult {
+    project::load_project(&path)
+}
+
+/// Create a new project for a root directory
+#[tauri::command]
+fn project_create(root_path: String) -> project::FFXProject {
+    project::FFXProject::new(&root_path)
+}
+
+// ============================================================================
+// File Viewer Commands
+// ============================================================================
+
+/// Read a chunk of a file for hex viewing
+#[tauri::command]
+fn viewer_read_chunk(path: String, offset: u64, size: Option<usize>) -> Result<viewer::FileChunk, String> {
+    viewer::read_file_chunk(&path, offset, size)
+}
+
+/// Detect file type from magic bytes and extension
+#[tauri::command]
+fn viewer_detect_type(path: String) -> Result<viewer::FileTypeInfo, String> {
+    viewer::detect_file_type(&path)
+}
+
+/// Parse file header and extract metadata with regions for hex highlighting
+#[tauri::command]
+fn viewer_parse_header(path: String) -> Result<viewer::ParsedMetadata, String> {
+    viewer::parse_file_header(&path)
+}
+
+/// Read file as text for text viewer
+#[tauri::command]
+fn viewer_read_text(path: String, offset: u64, max_chars: usize) -> Result<String, String> {
+    viewer::read_file_text(&path, offset, max_chars)
+}
+
 /// Start background system stats monitoring - emits "system-stats" events every 2 seconds
 fn start_system_stats_monitor(app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -931,6 +1315,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Initialize database early (in background thread to not block startup)
+            std::thread::spawn(|| {
+                let _ = database::get_db();  // This triggers lazy initialization
+                tracing::info!("Database initialized");
+            });
+            
             // Start background system stats monitoring
             start_system_stats_monitor(app.handle().clone());
             Ok(())
@@ -939,6 +1329,7 @@ pub fn run() {
             logical_info,
             logical_info_fast,
             logical_verify,
+            ad1_hash_segments,
             logical_extract,
             scan_directory,
             scan_directory_recursive,
@@ -950,7 +1341,42 @@ pub fn run() {
             raw_verify,
             raw_verify_segments,
             batch_hash,
-            get_system_stats
+            get_system_stats,
+            // Data viewing & analysis
+            read_file_bytes,
+            hex_dump,
+            detect_file_type,
+            analyze_file_entropy,
+            analyze_entropy_blocks,
+            compare_hashes,
+            verify_file_hash,
+            // Database operations
+            db_get_or_create_session,
+            db_get_recent_sessions,
+            db_get_last_session,
+            db_upsert_file,
+            db_get_files_for_session,
+            db_get_file_by_path,
+            db_insert_hash,
+            db_get_hashes_for_file,
+            db_get_latest_hash,
+            db_insert_verification,
+            db_get_verifications_for_file,
+            db_save_open_tabs,
+            db_get_open_tabs,
+            db_set_setting,
+            db_get_setting,
+            // Project file operations
+            project_get_default_path,
+            project_check_exists,
+            project_save,
+            project_load,
+            project_create,
+            // File viewer commands
+            viewer_read_chunk,
+            viewer_detect_type,
+            viewer_parse_header,
+            viewer_read_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

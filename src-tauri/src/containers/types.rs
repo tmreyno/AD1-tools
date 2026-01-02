@@ -7,7 +7,6 @@ use serde::{Serialize, Deserialize};
 use crate::ad1;
 use crate::archive;
 use crate::ewf;
-use crate::l01;
 use crate::raw;
 use crate::ufed;
 
@@ -71,8 +70,10 @@ pub struct CompanionLogInfo {
 pub struct ContainerInfo {
     pub container: String,
     pub ad1: Option<ad1::Ad1Info>,
-    pub e01: Option<ewf::E01Info>,
-    pub l01: Option<l01::L01Info>,
+    /// EWF physical image (E01/Ex01)
+    pub e01: Option<ewf::EwfInfo>,
+    /// EWF logical evidence (L01/Lx01) - same format as E01
+    pub l01: Option<ewf::EwfInfo>,
     pub raw: Option<raw::RawInfo>,
     pub archive: Option<archive::ArchiveInfo>,
     pub ufed: Option<ufed::UfedInfo>,

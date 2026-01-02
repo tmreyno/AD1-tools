@@ -8,7 +8,6 @@ use std::path::Path;
 use crate::ad1;
 use crate::archive;
 use crate::ewf;
-use crate::l01;
 use crate::raw;
 use crate::ufed;
 
@@ -55,7 +54,8 @@ pub fn info_fast(path: &str) -> Result<ContainerInfo, String> {
             })
         }
         ContainerKind::L01 => {
-            let info = l01::info(path)?;
+            // L01 uses the same EWF format as E01 (logical evidence vs physical)
+            let info = ewf::info(path)?;
             Ok(ContainerInfo {
                 container: "L01".to_string(),
                 ad1: None,
@@ -148,7 +148,8 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
             })
         }
         ContainerKind::L01 => {
-            let info = l01::info(path)?;
+            // L01 uses the same EWF format as E01 (logical evidence vs physical)
+            let info = ewf::info(path)?;
             Ok(ContainerInfo {
                 container: "L01".to_string(),
                 ad1: None,
@@ -227,7 +228,16 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
                 message: entry.message,
             }).collect())
         }
-        ContainerKind::L01 => Err("L01 verification is not implemented yet.".to_string()),
+        ContainerKind::L01 => {
+            // L01 uses the same EWF format - use ewf::verify_chunks
+            let ewf_results = ewf::verify_chunks(path, algorithm)?;
+            Ok(ewf_results.into_iter().map(|entry| VerifyEntry {
+                path: None,
+                chunk_index: Some(entry.chunk_index),
+                status: entry.status,
+                message: entry.message,
+            }).collect())
+        }
         ContainerKind::Raw => {
             let computed_hash = raw::verify(path, algorithm)?;
             Ok(vec![VerifyEntry {
@@ -247,7 +257,7 @@ pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
     match detect_container(path)? {
         ContainerKind::Ad1 => ad1::extract(path, output_dir),
         ContainerKind::E01 => ewf::extract(path, output_dir),
-        ContainerKind::L01 => Err("L01 extraction is not implemented yet.".to_string()),
+        ContainerKind::L01 => ewf::extract(path, output_dir),  // L01 uses same EWF extraction
         ContainerKind::Raw => raw::extract(path, output_dir),
         ContainerKind::Archive => Err("Archive extraction is not implemented yet. Use standard archive tools (7z, unzip).".to_string()),
         ContainerKind::Ufed => Err("UFED extraction is not implemented yet. The UFED container is typically already extracted.".to_string()),
@@ -281,9 +291,10 @@ pub(crate) fn detect_container(path: &str) -> Result<ContainerKind, String> {
         }
     }
     
-    // Check L01
-    if (lower.ends_with(".l01") || lower.ends_with(".lx01"))
-        && l01::is_l01(path).unwrap_or(false) 
+    // Check L01/Lx01 - use ewf::is_l01_file for proper LVF signature detection
+    if (lower.ends_with(".l01") || lower.ends_with(".lx01") 
+        || lower.contains(".l0") || lower.contains(".lx"))
+        && ewf::is_l01_file(path).unwrap_or(false) 
     {
         return Ok(ContainerKind::L01);
     }

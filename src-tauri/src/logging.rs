@@ -5,7 +5,7 @@
 //! # Usage
 //! 
 //! Initialize logging at app startup:
-//! ```rust
+//! ```rust,ignore
 //! logging::init();
 //! ```
 //! 

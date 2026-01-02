@@ -71,4 +71,5 @@ pub use types::{
 pub use operations::{
     info, info_fast, verify, verify_with_progress,
     extract, extract_with_progress, is_ad1,
+    hash_segments, hash_segments_with_progress,
 };

@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import { HASH_ALGORITHMS } from "../types";
 import type { HashAlgorithm, HashAlgorithmInfo } from "../types";
 
@@ -17,6 +17,11 @@ interface ToolbarProps {
   onHashSelected: () => void;
   onHashAll: () => void;
   onLoadAll: () => void;
+  // Project management
+  projectPath?: string | null;
+  projectModified?: boolean;
+  onSaveProject?: () => void;
+  onLoadProject?: () => void;
 }
 
 // Get tooltip for hash algorithm
@@ -36,25 +41,26 @@ export function Toolbar(props: ToolbarProps) {
   const currentAlgoInfo = () => HASH_ALGORITHMS.find(a => a.value === props.selectedHashAlgorithm);
   
   return (
-    <div class="toolbar">
+    <div class="flex items-center gap-2 px-3 py-2 bg-bg-panel border-b border-border shrink-0 h-11 flex-nowrap overflow-x-auto">
       <button 
-        class="tool-btn primary" 
+        class="btn btn-primary" 
         onClick={props.onBrowse} 
         disabled={props.busy}
       >
         📁 Open Directory
       </button>
       
-      <div class="tool-input">
+      <div class="flex flex-1 min-w-[200px] max-w-[400px]">
         <input 
           type="text" 
+          class="flex-1 px-2.5 py-1.5 bg-bg border border-border rounded-l text-txt text-sm focus:outline-none focus:border-accent"
           value={props.scanDir} 
           onInput={(e) => props.onScanDirChange(e.currentTarget.value)} 
           placeholder="Evidence directory path..." 
           onKeyDown={(e) => e.key === "Enter" && props.onScan()} 
         />
         <button 
-          class="tool-btn" 
+          class="btn btn-default rounded-l-none border-l-0" 
           onClick={props.onScan} 
           disabled={props.busy || !props.scanDir}
         >
@@ -62,19 +68,20 @@ export function Toolbar(props: ToolbarProps) {
         </button>
       </div>
       
-      <label class="tool-toggle" title="Scan subdirectories">
+      <label class="flex items-center gap-1.5 text-sm text-txt-muted cursor-pointer whitespace-nowrap" title="Scan subdirectories">
         <input 
           type="checkbox" 
+          class="accent-accent"
           checked={props.recursiveScan} 
           onChange={(e) => props.onRecursiveScanChange(e.currentTarget.checked)} 
         />
         <span>Recursive</span>
       </label>
       
-      <div class="tool-sep" />
+      <div class="w-px h-6 bg-border mx-1" />
       
       <select 
-        class={`tool-select ${currentAlgoInfo()?.speed === 'fast' ? 'fast-algo' : ''}`}
+        class={`select ${currentAlgoInfo()?.speed === 'fast' ? 'border-success bg-gradient-to-br from-bg-card to-success-soft' : ''}`}
         value={props.selectedHashAlgorithm} 
         onChange={(e) => props.onHashAlgorithmChange(e.currentTarget.value as HashAlgorithm)} 
         title={currentAlgoInfo() ? getAlgorithmTooltip(currentAlgoInfo()!) : "Hash algorithm"}
@@ -92,7 +99,7 @@ export function Toolbar(props: ToolbarProps) {
       </select>
       
       <button 
-        class="tool-btn" 
+        class="btn btn-default" 
         onClick={props.onHashSelected} 
         disabled={props.busy || props.selectedCount === 0} 
         title={`Hash ${props.selectedCount} selected files in parallel`}
@@ -101,7 +108,7 @@ export function Toolbar(props: ToolbarProps) {
       </button>
       
       <button 
-        class="tool-btn" 
+        class="btn btn-default" 
         onClick={props.onHashAll} 
         disabled={props.busy || props.discoveredCount === 0} 
         title={props.selectedCount > 0 
@@ -112,13 +119,40 @@ export function Toolbar(props: ToolbarProps) {
       </button>
       
       <button 
-        class="tool-btn" 
+        class="btn btn-default" 
         onClick={props.onLoadAll} 
         disabled={props.busy || props.discoveredCount === 0} 
         title="Load metadata for all files"
       >
         ℹ️ Load All
       </button>
+      
+      <div class="w-px h-6 bg-border mx-1" />
+      
+      {/* Project Management */}
+      <Show when={props.onSaveProject}>
+        <button 
+          class={`btn ${props.projectModified ? 'btn-warning' : 'btn-default'}`}
+          onClick={props.onSaveProject} 
+          disabled={props.busy || !props.scanDir}
+          title={props.projectPath 
+            ? `Save project to ${props.projectPath}${props.projectModified ? ' (modified)' : ''}`
+            : "Save project"}
+        >
+          💾 {props.projectModified ? 'Save*' : 'Save'}
+        </button>
+      </Show>
+      
+      <Show when={props.onLoadProject}>
+        <button 
+          class="btn btn-default" 
+          onClick={props.onLoadProject} 
+          disabled={props.busy}
+          title="Load a project file"
+        >
+          📂 Load
+        </button>
+      </Show>
     </div>
   );
 }

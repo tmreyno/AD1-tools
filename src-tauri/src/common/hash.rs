@@ -14,6 +14,8 @@ use blake3::Hasher as Blake3Hasher;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh64::Xxh64;
 use crc32fast::Hasher as Crc32Hasher;
+use serde::Serialize;
+use tracing::{debug, trace, instrument};
 
 use super::BUFFER_SIZE;
 
@@ -250,6 +252,7 @@ pub fn compute_hash_str(data: &[u8], algorithm: &str) -> Result<String, String> 
 /// 
 /// # Returns
 /// The hex-encoded hash string
+#[instrument(skip(progress_callback), fields(path = %path.display()))]
 pub fn hash_file_with_progress<F>(
     path: &Path,
     algorithm: &str,
@@ -265,6 +268,8 @@ where
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("Failed to get file metadata: {}", e))?;
     let total_size = metadata.len();
+    
+    debug!(algorithm, total_size, "Starting file hash");
 
     let file = File::open(path)
         .map_err(|e| format!("Failed to open file: {}", e))?;
@@ -274,10 +279,12 @@ where
 
     // For BLAKE3, use parallel hashing for best performance
     if algorithm_lower == "blake3" {
+        trace!("Using BLAKE3 parallel hashing");
         return hash_file_blake3_parallel(&mut reader, total_size, &mut progress_callback);
     }
 
     // For other algorithms, use streaming hasher
+    trace!("Using streaming hasher for {}", algorithm);
     let mut hasher = StreamingHasher::from_str(algorithm)?;
     let mut bytes_read_total = 0u64;
     let report_interval = (total_size / 20).max(BUFFER_SIZE as u64);
@@ -302,7 +309,9 @@ where
     }
 
     progress_callback(total_size, total_size);
-    Ok(hasher.finalize())
+    let hash = hasher.finalize();
+    debug!(hash = %hash, "File hash complete");
+    Ok(hash)
 }
 
 /// BLAKE3 optimized path using rayon parallel hashing
@@ -372,6 +381,175 @@ pub fn guess_algorithm_from_hash(hash: &str) -> Option<HashAlgorithm> {
 /// Compare two hashes (case-insensitive)
 pub fn hashes_match(hash1: &str, hash2: &str) -> bool {
     hash1.to_lowercase() == hash2.to_lowercase()
+}
+
+// =============================================================================
+// Hash Comparison and Verification
+// =============================================================================
+
+/// Result of hash comparison
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum HashMatchResult {
+    /// Exact match (same case)
+    Exact,
+    /// Match but different case (e.g., "abc" vs "ABC")
+    CaseInsensitive,
+    /// Hashes do not match
+    Mismatch,
+    /// One or both hashes are invalid format
+    Invalid,
+}
+
+impl HashMatchResult {
+    /// Returns true if the hashes match (exact or case-insensitive)
+    pub fn is_match(&self) -> bool {
+        matches!(self, HashMatchResult::Exact | HashMatchResult::CaseInsensitive)
+    }
+}
+
+/// Compare two hash strings with detailed result
+pub fn compare_hashes(computed: &str, expected: &str) -> HashMatchResult {
+    let computed = computed.trim();
+    let expected = expected.trim();
+    
+    // Check for invalid characters
+    if !computed.chars().all(|c| c.is_ascii_hexdigit()) 
+        || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        return HashMatchResult::Invalid;
+    }
+    
+    // Length mismatch
+    if computed.len() != expected.len() {
+        return HashMatchResult::Mismatch;
+    }
+    
+    // Exact match
+    if computed == expected {
+        return HashMatchResult::Exact;
+    }
+    
+    // Case-insensitive match
+    if computed.eq_ignore_ascii_case(expected) {
+        return HashMatchResult::CaseInsensitive;
+    }
+    
+    HashMatchResult::Mismatch
+}
+
+/// Detailed hash verification result
+#[derive(Debug, Clone, Serialize)]
+pub struct HashVerificationResult {
+    /// Algorithm used for hashing
+    pub algorithm: String,
+    /// Computed hash value
+    pub computed: String,
+    /// Expected/stored hash value
+    pub expected: String,
+    /// Whether the hashes match
+    pub matches: bool,
+    /// Detailed match result
+    pub match_result: HashMatchResult,
+    /// Time taken to compute (in milliseconds)
+    pub compute_time_ms: Option<u64>,
+    /// Size of data hashed
+    pub data_size: Option<u64>,
+}
+
+impl HashVerificationResult {
+    /// Create a new verification result
+    pub fn new(
+        algorithm: HashAlgorithm,
+        computed: String,
+        expected: String,
+    ) -> Self {
+        let match_result = compare_hashes(&computed, &expected);
+        Self {
+            algorithm: algorithm.name().to_string(),
+            computed,
+            expected,
+            matches: match_result.is_match(),
+            match_result,
+            compute_time_ms: None,
+            data_size: None,
+        }
+    }
+
+    /// Add timing information
+    pub fn with_timing(mut self, compute_time_ms: u64) -> Self {
+        self.compute_time_ms = Some(compute_time_ms);
+        self
+    }
+
+    /// Add data size information
+    pub fn with_data_size(mut self, size: u64) -> Self {
+        self.data_size = Some(size);
+        self
+    }
+}
+
+/// Batch verification result for multiple algorithms
+#[derive(Debug, Clone, Serialize)]
+pub struct MultiHashVerification {
+    /// File or data identifier
+    pub identifier: String,
+    /// Individual verification results
+    pub results: Vec<HashVerificationResult>,
+    /// Overall pass/fail (all must match)
+    pub all_passed: bool,
+    /// Number of algorithms verified
+    pub algorithm_count: usize,
+}
+
+impl MultiHashVerification {
+    /// Create from a list of verification results
+    pub fn from_results(identifier: String, results: Vec<HashVerificationResult>) -> Self {
+        let all_passed = results.iter().all(|r| r.matches);
+        let algorithm_count = results.len();
+        Self {
+            identifier,
+            results,
+            all_passed,
+            algorithm_count,
+        }
+    }
+}
+
+/// Verify a computed hash against an expected value
+pub fn verify_hash(
+    data: &[u8],
+    expected: &str,
+    algorithm: HashAlgorithm,
+) -> HashVerificationResult {
+    use std::time::Instant;
+    
+    let start = Instant::now();
+    let computed = compute_hash(data, algorithm);
+    let elapsed = start.elapsed().as_millis() as u64;
+    
+    HashVerificationResult::new(algorithm, computed, expected.to_string())
+        .with_timing(elapsed)
+        .with_data_size(data.len() as u64)
+}
+
+/// Verify a file's hash against an expected value
+pub fn verify_file_hash(
+    path: &std::path::Path,
+    expected: &str,
+    algorithm: HashAlgorithm,
+) -> Result<HashVerificationResult, String> {
+    use std::time::Instant;
+    
+    let start = Instant::now();
+    let computed = hash_file(path, algorithm.name())?;
+    let elapsed = start.elapsed().as_millis() as u64;
+    
+    let file_size = std::fs::metadata(path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    
+    Ok(HashVerificationResult::new(algorithm, computed, expected.to_string())
+        .with_timing(elapsed)
+        .with_data_size(file_size))
 }
 
 #[cfg(test)]
