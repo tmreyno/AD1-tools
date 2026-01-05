@@ -24,3 +24,21 @@ export {
   exportAsMarkdown,
   type ReportInput,
 } from "./generator";
+
+// API exports (Tauri commands)
+export {
+  containerToInput,
+  containersToInputs,
+  extractEvidenceFromContainers,
+  createEvidenceFromContainer,
+  generateEvidenceFromFiles,
+  getReportTemplate,
+  isAiAvailable,
+  exportReportJson,
+  importReportJson,
+  type ContainerInfoInput,
+  type StoredHashInput,
+  type EvidenceItem as BackendEvidenceItem,
+  type HashRecord as BackendHashRecord,
+  type ImageInfo,
+} from "./api";

@@ -1,6 +1,10 @@
 import { onMount, onCleanup, createSignal, createEffect, Show } from "solid-js";
-import { useFileManager, useHashManager, useDatabase, useProject } from "./hooks";
-import { Toolbar, StatusBar, FilePanel, TabbedDetailPanel, TreePanel, ProgressModal } from "./components";
+import { useFileManager, useHashManager, useDatabase, useProject, useProcessedDatabases } from "./hooks";
+import { Toolbar, StatusBar, FilePanel, DetailPanel, TreePanel, ProgressModal, MetadataPanel, ReportWizard } from "./components";
+import ProcessedDatabasePanel from "./components/ProcessedDatabasePanel";
+import ProcessedDetailPanel from "./components/ProcessedDetailPanel";
+import type { ParsedMetadata, TabViewMode } from "./components";
+import ffxLogo from "./assets/branding/ffx-logo-48.png";
 import "./App.css";
 
 function App() {
@@ -16,27 +20,54 @@ function App() {
   // Initialize project management hook
   const projectManager = useProject();
   
-  // Track open tabs (from TabbedDetailPanel) for project save
+  // Initialize processed databases hook (for AXIOM, Cellebrite, etc.)
+  const processedDbManager = useProcessedDatabases();
+  
+  // Track open tabs (from DetailPanel) for project save
   const [openTabs, setOpenTabs] = createSignal<Array<{ file: any; id: string }>>([]);
   
+  // Track current view mode for right panel switching
+  const [currentViewMode, setCurrentViewMode] = createSignal<TabViewMode>("info");
+  
+  // Track hex viewer metadata for MetadataPanel
+  const [hexMetadata, setHexMetadata] = createSignal<ParsedMetadata | null>(null);
+  
+  // Clear metadata when active file changes
+  createEffect(() => {
+    const _file = fileManager.activeFile(); // Track active file
+    // Clear hex metadata when file changes - new file needs fresh parsing
+    setHexMetadata(null);
+    // Also reset view mode to info when switching files
+    setCurrentViewMode("info");
+  });
+  
+  // Store hex viewer navigation function
+  const [hexNavigator, setHexNavigator] = createSignal<((offset: number, size?: number) => void) | null>(null);
+  
+  // Wrapper to set navigator
+  const handleHexNavigatorReady = (nav: (offset: number, size?: number) => void) => {
+    setHexNavigator(() => nav);
+  };
+  
+  // Request view mode change (for MetadataPanel navigation)
+  const [requestViewMode, setRequestViewMode] = createSignal<"info" | "hex" | "text" | null>(null);
+  
+  // Report wizard state
+  const [showReportWizard, setShowReportWizard] = createSignal(false);
+  
+  // Left panel tab state: "evidence" or "processed"
+  const [leftPanelTab, setLeftPanelTab] = createSignal<"evidence" | "processed">("evidence");
+  
   // Resizable panel state
-  const [leftWidth, setLeftWidth] = createSignal(
-    parseInt(localStorage.getItem('ffx-left-width') ?? '320', 10)
-  );
-  const [rightWidth, setRightWidth] = createSignal(
-    parseInt(localStorage.getItem('ffx-right-width') ?? '280', 10)
-  );
+  const [leftWidth, setLeftWidth] = createSignal(320);
+  const [rightWidth, setRightWidth] = createSignal(280);
   const [leftCollapsed, setLeftCollapsed] = createSignal(false);
-  const [rightCollapsed, setRightCollapsed] = createSignal(false);
+  const [rightCollapsed, setRightCollapsed] = createSignal(true); // Start collapsed
   const [dragging, setDragging] = createSignal<'left' | 'right' | null>(null);
   
-  // Save widths to localStorage
-  createEffect(() => {
-    if (!leftCollapsed()) localStorage.setItem('ffx-left-width', leftWidth().toString());
-  });
-  createEffect(() => {
-    if (!rightCollapsed()) localStorage.setItem('ffx-right-width', rightWidth().toString());
-  });
+  // Responsive: track window width for compact toolbar
+  const [windowWidth, setWindowWidth] = createSignal(window.innerWidth);
+  const isCompact = () => windowWidth() < 900;
   
   // Initialize/update database session when scan directory changes (debounced)
   let sessionInitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,12 +137,39 @@ function App() {
 
   // Store cleanup function reference
   let cleanupSystemStats: (() => void) | undefined;
+  
+  // Handle window resize for responsive toolbar
+  const handleResize = () => setWindowWidth(window.innerWidth);
 
   onMount(async () => {
     const unlisten = await fileManager.setupSystemStatsListener();
     cleanupSystemStats = unlisten;
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('resize', handleResize);
+    
+    // Set up auto-save callback with current state
+    projectManager.setAutoSaveCallback(async () => {
+      const scanDir = fileManager.scanDir();
+      if (!scanDir) return;
+      
+      await projectManager.saveProject({
+        rootPath: scanDir,
+        openTabs: openTabs(),
+        activeTabPath: fileManager.activeFile()?.path || null,
+        hashHistory: hashManager.hashHistory(),
+        processedDatabases: processedDbManager.databases(),
+        selectedProcessedDb: processedDbManager.selectedDatabase(),
+        uiState: {
+          left_panel_width: leftWidth(),
+          right_panel_width: rightWidth(),
+          left_panel_collapsed: leftCollapsed(),
+          right_panel_collapsed: rightCollapsed(),
+          left_panel_tab: leftPanelTab(),
+          detail_view_mode: currentViewMode(),
+        },
+      });
+    });
     
     // Try to restore last session (non-blocking)
     db.restoreLastSession()
@@ -131,18 +189,26 @@ function App() {
     if (fileSaveTimer) clearTimeout(fileSaveTimer);
     window.removeEventListener('mousemove', handleMouseMove);
     window.removeEventListener('mouseup', handleMouseUp);
+    window.removeEventListener('resize', handleResize);
+    
+    // Stop auto-save on cleanup
+    projectManager.stopAutoSave();
   });
 
   // Helper for TreePanel - gets info for active file
-  const activeFileInfo = () => fileManager.activeFile() ? fileManager.fileInfoMap().get(fileManager.activeFile()!.path) : undefined;
+  const activeFileInfo = () => {
+    const active = fileManager.activeFile();
+    if (!active) return undefined;
+    return fileManager.fileInfoMap().get(active.path);
+  };
 
   return (
     <div class="app-root" classList={{ 'is-resizing': dragging() !== null }}>
       {/* Header */}
       <header class="app-header">
         <div class="brand">
-          <span class="brand-icon">🔬</span>
-          <span class="brand-name">FFX</span>
+          <img src={ffxLogo} alt="CORE-FFX Logo" class="brand-logo" />
+          <span class="brand-name">CORE</span>
           <span class="brand-tag">Forensic File Xplorer</span>
         </div>
         <div class="header-status">
@@ -165,7 +231,6 @@ function App() {
         onBrowse={() => fileManager.browseScanDir()}
         onScan={() => fileManager.scanForFiles()}
         onHashSelected={() => hashManager.hashSelectedFiles()}
-        onHashAll={() => hashManager.hashAllFiles()}
         onLoadAll={() => fileManager.loadAllInfo()}
         // Project management
         projectPath={projectManager.projectPath()}
@@ -174,12 +239,22 @@ function App() {
           const scanDir = fileManager.scanDir();
           if (scanDir) {
             const activeTabPath = fileManager.activeFile()?.path || null;
-            projectManager.saveProject(
-              scanDir,
-              openTabs(),
+            projectManager.saveProject({
+              rootPath: scanDir,
+              openTabs: openTabs(),
               activeTabPath,
-              hashManager.hashHistory()
-            );
+              hashHistory: hashManager.hashHistory(),
+              processedDatabases: processedDbManager.databases(),
+              selectedProcessedDb: processedDbManager.selectedDatabase(),
+              uiState: {
+                left_panel_width: leftWidth(),
+                right_panel_width: rightWidth(),
+                left_panel_collapsed: leftCollapsed(),
+                right_panel_collapsed: rightCollapsed(),
+                left_panel_tab: leftPanelTab(),
+                detail_view_mode: currentViewMode(),
+              },
+            });
           }
         }}
         onLoadProject={async () => {
@@ -187,10 +262,28 @@ function App() {
           if (result.project) {
             // Restore scan directory
             fileManager.setScanDir(result.project.root_path);
-            // Could also restore tabs, but that requires more wiring
+            
+            // Restore UI state
+            if (result.project.ui_state) {
+              const ui = result.project.ui_state;
+              if (ui.left_panel_width) setLeftWidth(ui.left_panel_width);
+              if (ui.right_panel_width) setRightWidth(ui.right_panel_width);
+              if (ui.left_panel_collapsed !== undefined) setLeftCollapsed(ui.left_panel_collapsed);
+              if (ui.right_panel_collapsed !== undefined) setRightCollapsed(ui.right_panel_collapsed);
+              if (ui.left_panel_tab) setLeftPanelTab(ui.left_panel_tab);
+              if (ui.detail_view_mode) setCurrentViewMode(ui.detail_view_mode as TabViewMode);
+            }
+            
+            // Log activity
+            projectManager.logActivity('project', 'open', `Opened project: ${result.project.name}`);
+            
             console.log("Project loaded:", result.project.name);
           }
         }}
+        // Report generation
+        onGenerateReport={() => setShowReportWizard(true)}
+        // Responsive mode
+        compact={isCompact()}
       />
 
       {/* Main Content Area */}
@@ -198,7 +291,39 @@ function App() {
         {/* Left Panel */}
         <Show when={!leftCollapsed()}>
           <aside class="left-panel" style={{ width: `${leftWidth()}px` }}>
-            <FilePanel
+            {/* Panel Tab Switcher */}
+            <div class="left-panel-tabs">
+              <button 
+                class="panel-tab" 
+                classList={{ active: leftPanelTab() === "evidence" }}
+                onClick={() => setLeftPanelTab("evidence")}
+                title="Evidence Containers (E01, AD1, L01, etc.)"
+              >
+                📦 Evidence
+              </button>
+              <button 
+                class="panel-tab" 
+                classList={{ active: leftPanelTab() === "processed" }}
+                onClick={() => setLeftPanelTab("processed")}
+                title="Processed Databases (AXIOM, Cellebrite PA, etc.)"
+              >
+                📊 Processed
+              </button>
+            </div>
+            
+            {/* Tab Content */}
+            <Show when={leftPanelTab() === "evidence"} fallback={
+              <ProcessedDatabasePanel 
+                manager={processedDbManager}
+                onSelectDatabase={(db) => {
+                  processedDbManager.selectDatabase(db);
+                  // Clear active forensic file when switching to processed view
+                  fileManager.setActiveFile(null);
+                }}
+                onSelectArtifact={(db, artifact) => console.log('Selected artifact:', artifact.name, 'from', db.path)}
+              />
+            }>
+              <FilePanel
               discoveredFiles={fileManager.discoveredFiles()}
               filteredFiles={fileManager.filteredFiles()}
               selectedFiles={fileManager.selectedFiles()}
@@ -228,6 +353,7 @@ function App() {
                 (path) => fileManager.toggleFileSelection(path)
               )}
             />
+            </Show>
           </aside>
         </Show>
 
@@ -246,27 +372,44 @@ function App() {
 
         {/* Center Panel */}
         <section class="center-panel">
-          <TabbedDetailPanel
-            activeFile={fileManager.activeFile()}
-            fileInfoMap={fileManager.fileInfoMap()}
-            fileStatusMap={fileManager.fileStatusMap()}
-            fileHashMap={hashManager.fileHashMap()}
-            hashHistory={hashManager.hashHistory()}
-            segmentResults={hashManager.segmentResults()}
-            tree={fileManager.tree()}
-            filteredTree={fileManager.filteredTree()}
-            treeFilter={fileManager.treeFilter()}
-            onTreeFilterChange={(filter: string) => fileManager.setTreeFilter(filter)}
-            selectedHashAlgorithm={hashManager.selectedHashAlgorithm()}
-            segmentVerifyProgress={hashManager.segmentVerifyProgress()}
-            storedHashesGetter={hashManager.getAllStoredHashesSorted}
-            busy={fileManager.busy()}
-            onVerifySegments={(file) => hashManager.verifySegments(file)}
-            onLoadInfo={(file) => fileManager.loadFileInfo(file, true)}
-            formatHashDate={hashManager.formatHashDate}
-            onTabSelect={(file) => fileManager.setActiveFile(file)}
-            onTabsChange={(tabs) => setOpenTabs(tabs)}
-          />
+          {/* Show ProcessedDetailPanel when viewing processed databases */}
+          <Show when={leftPanelTab() === "processed" && processedDbManager.selectedDatabase()} fallback={
+            <DetailPanel
+              activeFile={fileManager.activeFile()}
+              fileInfoMap={fileManager.fileInfoMap}
+              fileStatusMap={fileManager.fileStatusMap}
+              fileHashMap={hashManager.fileHashMap}
+              hashHistory={hashManager.hashHistory}
+              segmentResults={hashManager.segmentResults}
+              tree={fileManager.tree()}
+              filteredTree={fileManager.filteredTree()}
+              treeFilter={fileManager.treeFilter()}
+              onTreeFilterChange={(filter: string) => fileManager.setTreeFilter(filter)}
+              selectedHashAlgorithm={hashManager.selectedHashAlgorithm()}
+              segmentVerifyProgress={hashManager.segmentVerifyProgress()}
+              storedHashesGetter={hashManager.getAllStoredHashesSorted}
+              busy={fileManager.busy()}
+              onVerifySegments={(file) => hashManager.verifySegments(file)}
+              onLoadInfo={(file) => fileManager.loadFileInfo(file, true)}
+              formatHashDate={hashManager.formatHashDate}
+              onTabSelect={(file) => fileManager.setActiveFile(file)}
+              onTabsChange={(tabs) => setOpenTabs(tabs)}
+              onMetadataLoaded={setHexMetadata}
+              onViewModeChange={setCurrentViewMode}
+              onHexNavigatorReady={handleHexNavigatorReady}
+              requestViewMode={requestViewMode()}
+              onViewModeRequestHandled={() => setRequestViewMode(null)}
+            />
+          }>
+            <ProcessedDetailPanel
+              database={processedDbManager.selectedDatabase()}
+              caseInfo={processedDbManager.selectedCaseInfo()}
+              categories={processedDbManager.selectedCategories()}
+              loading={processedDbManager.isSelectedLoading()}
+              detailView={processedDbManager.detailView()}
+              onDetailViewChange={(view) => processedDbManager.setDetailView(view)}
+            />
+          </Show>
         </section>
 
         {/* Right Resize Handle */}
@@ -282,10 +425,42 @@ function App() {
           </Show>
         </div>
 
-        {/* Right Panel */}
+        {/* Right Panel - switches based on view mode */}
         <Show when={!rightCollapsed()}>
           <aside class="right-panel" style={{ width: `${rightWidth()}px` }}>
-            <TreePanel info={activeFileInfo()} />
+            <Show when={currentViewMode() === "hex"} fallback={<TreePanel info={activeFileInfo()} />}>
+              <MetadataPanel 
+                metadata={hexMetadata()}
+                containerInfo={activeFileInfo()}
+                fileInfo={fileManager.activeFile() ? {
+                  path: fileManager.activeFile()!.path,
+                  filename: fileManager.activeFile()!.filename,
+                  size: fileManager.activeFile()!.size,
+                  created: fileManager.activeFile()!.created,
+                  modified: fileManager.activeFile()!.modified,
+                  container_type: fileManager.activeFile()!.container_type,
+                  segment_count: fileManager.activeFile()!.segment_count
+                } : null}
+                onRegionClick={(offset) => {
+                  // Request DetailPanel to switch to hex view mode
+                  setRequestViewMode("hex");
+                  
+                  // Retry function to wait for HexViewer to mount
+                  const tryNavigate = (attempts: number) => {
+                    const nav = hexNavigator();
+                    if (nav) {
+                      nav(offset);
+                    } else if (attempts > 0) {
+                      // HexViewer not mounted yet, retry
+                      setTimeout(() => tryNavigate(attempts - 1), 100);
+                    }
+                  };
+                  
+                  // Start retrying after a small delay for view mode to switch
+                  setTimeout(() => tryNavigate(5), 100);
+                }}
+              />
+            </Show>
           </aside>
         </Show>
       </main>
@@ -309,6 +484,20 @@ function App() {
         total={fileManager.loadProgress().total}
         onCancel={fileManager.cancelLoading}
       />
+      
+      {/* Report Wizard Modal */}
+      <Show when={showReportWizard()}>
+        <ReportWizard
+          files={fileManager.discoveredFiles()}
+          fileInfoMap={fileManager.fileInfoMap()}
+          fileHashMap={hashManager.fileHashMap()}
+          onClose={() => setShowReportWizard(false)}
+          onGenerated={(path, format) => {
+            console.log(`Report generated: ${path} (${format})`);
+            fileManager.setOk(`Report saved to ${path}`);
+          }}
+        />
+      </Show>
     </div>
   );
 }

@@ -145,6 +145,15 @@ pub struct EwfInfo {
     pub serial_number: Option<String>,
     pub stored_hashes: Vec<StoredImageHash>,
     pub segment_files: Option<Vec<String>>,
+    /// Section offsets for hex navigation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_section_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_section_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_section_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest_section_offset: Option<u64>,
 }
 
 /// VerifyEntry for container verification results

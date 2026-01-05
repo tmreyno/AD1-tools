@@ -74,10 +74,53 @@ pub fn info(path: &str) -> Result<EwfInfo, String> {
             verified: h.verified,
             timestamp: h.timestamp.clone().or_else(|| acquiry_date.clone()),
             source: h.source.clone(),
+            offset: h.offset,
+            size: h.size,
         }
     }).collect();
     
-    debug!(stored_hash_count = stored_hashes.len(), "EWF info complete");
+    // Extract section offsets from first segment for hex navigation
+    let mut header_section_offset: Option<u64> = None;
+    let mut volume_section_offset: Option<u64> = None;
+    let mut hash_section_offset: Option<u64> = None;
+    let mut digest_section_offset: Option<u64> = None;
+    
+    if let Some(first_segment) = handle.segments.first() {
+        for section in &first_segment.sections {
+            match section.section_type.as_str() {
+                "header" => {
+                    if header_section_offset.is_none() {
+                        header_section_offset = Some(section.offset_in_segment);
+                    }
+                }
+                "volume" | "disk" => {
+                    if volume_section_offset.is_none() {
+                        volume_section_offset = Some(section.offset_in_segment);
+                    }
+                }
+                "hash" => {
+                    if hash_section_offset.is_none() {
+                        hash_section_offset = Some(section.offset_in_segment);
+                    }
+                }
+                "digest" => {
+                    if digest_section_offset.is_none() {
+                        digest_section_offset = Some(section.offset_in_segment);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    debug!(
+        stored_hash_count = stored_hashes.len(),
+        header_offset = ?header_section_offset,
+        volume_offset = ?volume_section_offset,
+        hash_offset = ?hash_section_offset,
+        digest_offset = ?digest_section_offset,
+        "EWF info complete"
+    );
     
     Ok(EwfInfo {
         format_version: "EWF1".to_string(),
@@ -99,6 +142,10 @@ pub fn info(path: &str) -> Result<EwfInfo, String> {
         serial_number: None,
         stored_hashes,
         segment_files,
+        header_section_offset,
+        volume_section_offset,
+        hash_section_offset,
+        digest_section_offset,
     })
 }
 

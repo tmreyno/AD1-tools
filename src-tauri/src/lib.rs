@@ -75,8 +75,10 @@ pub mod common;  // Shared utilities (hash, binary, segments)
 pub mod database;  // SQLite persistence layer
 pub mod ewf;  // Expert Witness Format (E01/L01/Ex01/Lx01) parser
 pub mod logging;  // Logging and tracing configuration
+pub mod processed;  // Processed forensic databases (AXIOM, PA, etc.)
 pub mod project;  // Project file handling (.ffxproj)
 pub mod raw;  // Raw disk images (.dd, .raw, .img, .001, etc.)
+pub mod report;  // Forensic report generation (PDF, DOCX, HTML)
 pub mod ufed;  // UFED containers (UFD, UFDR, UFDX)
 pub mod viewer;  // Hex/text file viewer
 pub mod containers;  // Container abstraction layer
@@ -248,6 +250,51 @@ async fn e01_v3_verify(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// Read bytes from E01 image at arbitrary offset (for filesystem browsing)
+#[tauri::command]
+async fn e01_read_at(
+    #[allow(non_snake_case)]
+    inputPath: String,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut handle = ewf::EwfHandle::open(&inputPath)?;
+        handle.read_at(offset, length)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Get media info for E01 (size, sector size, chunk size)
+#[tauri::command]
+async fn e01_media_info(
+    #[allow(non_snake_case)]
+    inputPath: String,
+) -> Result<E01MediaInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = ewf::EwfHandle::open(&inputPath)?;
+        Ok(E01MediaInfo {
+            media_size: handle.get_media_size(),
+            chunk_size: handle.get_chunk_size(),
+            sector_size: handle.get_volume_info().bytes_per_sector,
+            sector_count: handle.get_volume_info().sector_count,
+            chunk_count: handle.get_chunk_count() as u64,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[derive(Clone, serde::Serialize)]
+struct E01MediaInfo {
+    media_size: u64,
+    chunk_size: u32,
+    sector_size: u32,
+    sector_count: u64,
+    chunk_count: u64,
+}
+
 // RAW Commands - Raw disk image implementation (.dd, .raw, .img, .001)
 #[tauri::command]
 async fn raw_info(
@@ -412,31 +459,40 @@ async fn raw_verify_segments(
                             segments_total: num_segments,
                         });
                         
-                        results.lock().unwrap().push(SegmentHashResult {
-                            segment_name,
-                            segment_number,
-                            segment_path: seg_path_str,
-                            algorithm: algorithm.to_uppercase(),
-                            computed_hash,
-                            expected_hash,
-                            verified,
-                            size,
-                            duration_secs: duration,
-                        });
+                        // Use if-let to handle potential mutex poisoning gracefully
+                        if let Ok(mut guard) = results.lock() {
+                            guard.push(SegmentHashResult {
+                                segment_name,
+                                segment_number,
+                                segment_path: seg_path_str,
+                                algorithm: algorithm.to_uppercase(),
+                                computed_hash,
+                                expected_hash,
+                                verified,
+                                size,
+                                duration_secs: duration,
+                            });
+                        } else {
+                            tracing::error!("Mutex poisoned while storing hash result for segment {}", segment_number);
+                        }
                     }
                     Err(e) => {
                         // Return error result for this segment
-                        results.lock().unwrap().push(SegmentHashResult {
-                            segment_name,
-                            segment_number,
-                            segment_path: seg_path_str,
-                            algorithm: algorithm.to_uppercase(),
-                            computed_hash: format!("ERROR: {}", e),
-                            expected_hash: None,
-                            verified: None,
-                            size,
-                            duration_secs: duration,
-                        });
+                        if let Ok(mut guard) = results.lock() {
+                            guard.push(SegmentHashResult {
+                                segment_name,
+                                segment_number,
+                                segment_path: seg_path_str,
+                                algorithm: algorithm.to_uppercase(),
+                                computed_hash: format!("ERROR: {}", e),
+                                expected_hash: None,
+                                verified: None,
+                                size,
+                                duration_secs: duration,
+                            });
+                        } else {
+                            tracing::error!("Mutex poisoned while storing error result for segment {}", segment_number);
+                        }
                     }
                 }
             });
@@ -556,30 +612,38 @@ async fn e01_verify_segments(
                             segments_total: num_segments,
                         });
                         
-                        results.lock().unwrap().push(SegmentHashResult {
-                            segment_name,
-                            segment_number,
-                            segment_path: seg_path_str,
-                            algorithm: algorithm.to_uppercase(),
-                            computed_hash,
-                            expected_hash,
-                            verified,
-                            size,
-                            duration_secs: duration,
-                        });
+                        if let Ok(mut guard) = results.lock() {
+                            guard.push(SegmentHashResult {
+                                segment_name,
+                                segment_number,
+                                segment_path: seg_path_str,
+                                algorithm: algorithm.to_uppercase(),
+                                computed_hash,
+                                expected_hash,
+                                verified,
+                                size,
+                                duration_secs: duration,
+                            });
+                        } else {
+                            tracing::error!("Mutex poisoned while storing E01 hash result for segment {}", segment_number);
+                        }
                     }
                     Err(e) => {
-                        results.lock().unwrap().push(SegmentHashResult {
-                            segment_name,
-                            segment_number,
-                            segment_path: seg_path_str,
-                            algorithm: algorithm.to_uppercase(),
-                            computed_hash: format!("ERROR: {}", e),
-                            expected_hash: None,
-                            verified: None,
-                            size,
-                            duration_secs: duration,
-                        });
+                        if let Ok(mut guard) = results.lock() {
+                            guard.push(SegmentHashResult {
+                                segment_name,
+                                segment_number,
+                                segment_path: seg_path_str,
+                                algorithm: algorithm.to_uppercase(),
+                                computed_hash: format!("ERROR: {}", e),
+                                expected_hash: None,
+                                verified: None,
+                                size,
+                                duration_secs: duration,
+                            });
+                        } else {
+                            tracing::error!("Mutex poisoned while storing E01 error result for segment {}", segment_number);
+                        }
                     }
                 }
             });
@@ -920,7 +984,20 @@ fn get_system() -> &'static StdMutex<sysinfo::System> {
 }
 
 fn collect_system_stats() -> SystemStats {
-    let mut sys = get_system().lock().unwrap();
+    let Ok(mut sys) = get_system().lock() else {
+        // Return default stats if lock is poisoned
+        tracing::warn!("System stats lock poisoned, returning defaults");
+        return SystemStats {
+            cpu_usage: 0.0,
+            memory_used: 0,
+            memory_total: 0,
+            memory_percent: 0.0,
+            app_cpu_usage: 0.0,
+            app_memory: 0,
+            app_threads: 0,
+            cpu_cores: 0,
+        };
+    };
     sys.refresh_cpu_usage();
     sys.refresh_memory();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -1276,7 +1353,11 @@ fn project_create(root_path: String) -> project::FFXProject {
 
 /// Read a chunk of a file for hex viewing
 #[tauri::command]
-fn viewer_read_chunk(path: String, offset: u64, size: Option<usize>) -> Result<viewer::FileChunk, String> {
+fn viewer_read_chunk(
+    path: String, 
+    offset: u64, 
+    size: Option<usize>
+) -> Result<viewer::FileChunk, String> {
     viewer::read_file_chunk(&path, offset, size)
 }
 
@@ -1314,6 +1395,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(report::commands::ReportState::default())
         .setup(|app| {
             // Initialize database early (in background thread to not block startup)
             std::thread::spawn(|| {
@@ -1337,6 +1419,8 @@ pub fn run() {
             e01_v3_info,
             e01_v3_verify,
             e01_verify_segments,
+            e01_read_at,
+            e01_media_info,
             raw_info,
             raw_verify,
             raw_verify_segments,
@@ -1376,7 +1460,35 @@ pub fn run() {
             viewer_read_chunk,
             viewer_detect_type,
             viewer_parse_header,
-            viewer_read_text
+            viewer_read_text,
+            // Report generation commands
+            report::commands::generate_report,
+            report::commands::preview_report,
+            report::commands::get_output_formats,
+            report::commands::create_new_report,
+            report::commands::validate_report,
+            report::commands::add_evidence_to_report,
+            report::commands::add_finding_to_report,
+            report::commands::export_report_json,
+            report::commands::import_report_json,
+            report::commands::extract_evidence_from_containers,
+            report::commands::create_evidence_from_container,
+            report::commands::get_report_template,
+            // AI commands
+            report::commands::ai_commands::is_ai_available,
+            report::commands::ai_commands::get_ai_providers,
+            report::commands::ai_commands::generate_ai_narrative,
+            report::commands::ai_commands::check_ollama_connection,
+            // Processed database commands
+            processed::commands::scan_processed_databases,
+            processed::commands::get_processed_db_details,
+            processed::commands::is_processed_database,
+            processed::commands::get_processed_db_summary,
+            // AXIOM-specific commands
+            processed::commands::get_axiom_case_info,
+            processed::commands::get_axiom_artifact_categories,
+            processed::commands::query_axiom_artifacts_cmd,
+            processed::commands::list_axiom_db_tables
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

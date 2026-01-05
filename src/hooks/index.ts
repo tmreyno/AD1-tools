@@ -9,3 +9,6 @@ export { useDatabase } from "./useDatabase";
 export * from "./useDatabase";
 
 export { useProject } from "./useProject";
+
+export { useProcessedDatabases } from "./useProcessedDatabases";
+export type { ProcessedDatabasesManager } from "./useProcessedDatabases";

@@ -1,7 +1,7 @@
 [package]
-name = "ffx-check"
+name = "core-ffx"
 version = "0.1.0"
-description = "FFX - Forensic File Xplorer"
+description = "CORE-FFX - Forensic File Xplorer"
 authors = ["you"]
 edition = "2021"
 
@@ -21,7 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", default-features = true }
+chrono = { version = "0.4", default-features = true, features = ["serde"] }
 filetime = "0.2"
 flate2 = { version = "1", features = ["zlib-ng"] }  # Use zlib-ng for faster decompression (streaming is more efficient than libdeflate)
 hex = "0.4"
@@ -42,9 +42,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }  # Log subsc
 sysinfo = "0.32"  # System info (CPU, memory usage)
 zip = { version = "2.2", default-features = false, features = ["deflate"] }  # ZIP archive reading for Cellebrite detection
 
+# Report Generation
+genpdf = { version = "0.2", features = ["images"] }  # PDF generation
+docx-rs = "0.4"  # DOCX/Word document generation
+tera = "1.20"  # Template engine (Jinja2-like)
+quick-xml = { version = "0.37", features = ["serialize"] }  # XML parsing for AXIOM .mcfc files
+
+# AI Assistant (optional, feature-gated)
+langchain-rust = { version = "4.6", features = ["ollama"], optional = true }
+async-openai = { version = "0.28", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }  # For Ollama health check
+url = { version = "2.5", optional = true }  # URL parsing for security validation
+
 [features]
-default = []
+default = ["ai-assistant"]  # AI enabled by default for dev
 debug-logging = []  # Enable verbose debug logging
+ai-assistant = ["langchain-rust", "async-openai", "reqwest", "url"]  # Enable AI-powered report assistance
+typst-reports = []  # Enable Typst source file generation (compile with typst CLI)
 
 [dev-dependencies]
 tempfile = "3"  # For creating temporary test files

@@ -89,6 +89,24 @@
   .btn:disabled {
     @apply opacity-50 cursor-not-allowed;
   }
+  
+  .btn-icon {
+    @apply px-2 py-1.5;
+  }
+  
+  .btn-accent {
+    @apply bg-accent-soft border-accent text-accent;
+  }
+  .btn-accent:hover:not(:disabled) {
+    @apply bg-accent text-white;
+  }
+  
+  .btn-warning {
+    @apply bg-warning-soft border-warning text-warning;
+  }
+  .btn-warning:hover:not(:disabled) {
+    @apply brightness-110;
+  }
 
   /* ===== INPUTS ===== */
   .input {
@@ -620,7 +638,7 @@
 
 /* Content area wrapper */
 .detail-content-area {
-  @apply flex-1 overflow-hidden;
+  @apply flex-1 overflow-y-auto min-h-0;
 }
 
 .tab-action-btn {
@@ -1335,16 +1353,8 @@
   @apply px-2 py-1 bg-bg text-txt border border-border rounded text-2xs cursor-pointer;
 }
 
-.hex-legend {
-  @apply flex flex-wrap gap-3 py-1.5 px-3 bg-bg-panel border-b border-border text-2xs;
-}
-
-.hex-legend-item {
-  @apply flex items-center gap-1 cursor-help;
-}
-
-.hex-legend-color {
-  @apply w-3 h-3 rounded-sm;
+.hex-region-select {
+  @apply px-2 py-1 bg-bg text-txt border border-border rounded text-2xs cursor-pointer min-w-[140px];
 }
 
 .hex-error {
@@ -1393,11 +1403,15 @@
 }
 
 .hex-line:hover {
-  @apply bg-accent/5;
+  @apply bg-accent/10;
+}
+
+.hex-line:hover .hex-address {
+  @apply text-warning opacity-100 font-bold;
 }
 
 .hex-address {
-  @apply w-20 text-accent text-xs opacity-80;
+  @apply w-20 text-accent text-xs opacity-80 transition-all;
 }
 
 .hex-bytes {
@@ -1406,6 +1420,7 @@
 
 .hex-byte {
   @apply w-[22px] text-center py-px px-0.5 rounded-sm cursor-default transition-all;
+  background-color: transparent;
 }
 
 .hex-byte:hover {
@@ -1414,6 +1429,19 @@
 
 .hex-byte.highlighted {
   @apply font-medium;
+  /* Background color set via inline style */
+}
+
+.hex-byte.selected-region {
+  @apply ring-2 ring-warning ring-offset-1 ring-offset-bg z-10;
+}
+
+.hex-byte.navigated {
+  @apply ring-2 ring-green-500/50 ring-offset-1 ring-offset-bg z-10 font-bold;
+}
+
+.hex-byte.hovered {
+  @apply ring-1 ring-accent scale-110 z-20;
 }
 
 .hex-byte-empty {
@@ -1426,6 +1454,7 @@
 
 .hex-ascii-char {
   @apply w-2.5 text-center py-px rounded-sm transition-colors;
+  background-color: transparent;
 }
 
 .hex-ascii-char:hover {
@@ -1434,6 +1463,19 @@
 
 .hex-ascii-char.highlighted {
   @apply font-medium;
+  /* Background color set via inline style */
+}
+
+.hex-ascii-char.selected-region {
+  @apply ring-1 ring-warning;
+}
+
+.hex-ascii-char.navigated {
+  @apply ring-1 ring-green-500/50 font-bold;
+}
+
+.hex-ascii-char.hovered {
+  @apply ring-1 ring-accent;
 }
 
 /* ============================================================================
@@ -1556,123 +1598,113 @@
  * METADATA PANEL STYLES
  * ============================================================================ */
 
-.metadata-panel {
-  @apply flex flex-col h-full bg-bg text-sm overflow-auto;
+/* ============================================
+   Metadata Panel - Clean Table Layout
+   ============================================ */
+
+.meta-panel {
+  @apply flex flex-col h-full bg-bg text-xs overflow-auto;
 }
 
-.metadata-empty {
-  @apply flex flex-col items-center justify-center py-10 px-5 text-center h-full;
+.meta-empty {
+  @apply flex flex-col items-center justify-center py-8 text-txt-muted;
 }
 
-.metadata-empty-icon {
-  @apply text-4xl mb-3 opacity-50;
+.meta-empty-icon {
+  @apply text-2xl mb-2 opacity-40;
 }
 
-.metadata-empty-text {
-  @apply text-txt-muted text-sm mb-2;
+.meta-empty-text {
+  @apply text-xs;
 }
 
-.metadata-empty-hint {
-  @apply text-txt-muted text-2xs max-w-[200px];
+/* Format header - prominent display */
+.meta-format-header {
+  @apply flex items-center gap-2 py-2 px-3 border-b border-border bg-bg-panel;
 }
 
-.metadata-header {
-  @apply flex flex-col gap-1 p-3 bg-bg-panel border-b border-border;
+.meta-format-label {
+  @apply text-txt-muted text-2xs;
 }
 
-.metadata-format {
-  @apply text-sm font-semibold text-accent;
+.meta-format-value {
+  @apply font-semibold text-accent;
 }
 
-.metadata-version {
-  @apply text-2xs text-txt-muted ml-2;
+.meta-format-version {
+  @apply text-2xs text-txt-muted;
 }
 
-.metadata-section {
+/* File info */
+.meta-file-info {
   @apply border-b border-border;
 }
 
-.metadata-section-header {
-  @apply flex items-center gap-2 py-2.5 px-3 bg-bg-panel cursor-pointer select-none transition-colors;
+/* Categories */
+.meta-categories {
+  @apply flex-1;
 }
 
-.metadata-section-header:hover {
-  @apply bg-bg-hover;
+.meta-category {
+  @apply border-b border-border last:border-b-0;
 }
 
-.metadata-section-toggle {
+.meta-category-header {
+  @apply flex items-center gap-1.5 py-1.5 px-2 bg-bg-panel cursor-pointer select-none hover:bg-bg-hover transition-colors;
+}
+
+.meta-category-toggle {
   @apply text-[10px] text-txt-muted w-3;
 }
 
-.metadata-section-title {
-  @apply font-medium text-txt;
+.meta-category-name {
+  @apply text-2xs font-medium text-txt flex-1;
 }
 
-.metadata-fields {
-  @apply py-2;
+.meta-category-count {
+  @apply text-[9px] text-txt-muted;
 }
 
-.metadata-group {
-  @apply mb-3 last:mb-0;
+/* Rows - clean three-column table layout */
+.meta-rows {
+  @apply py-0.5;
 }
 
-.metadata-group-header {
-  @apply flex items-center gap-2 py-1.5 px-3 text-2xs font-semibold text-txt-muted uppercase tracking-wide;
+.meta-row {
+  @apply grid gap-2 py-1 px-2 text-2xs items-baseline transition-colors;
+  grid-template-columns: minmax(80px, 1fr) minmax(100px, 2fr) auto;
 }
 
-.metadata-group-color {
-  @apply w-2.5 h-2.5 rounded-sm;
-}
-
-.metadata-group-fields {
-  @apply px-2;
-}
-
-.metadata-field {
-  @apply flex flex-col p-2 my-0.5 bg-bg-panel rounded transition-colors;
-}
-
-.metadata-field:hover {
+.meta-row:hover {
   @apply bg-bg-hover;
 }
 
-.metadata-field-header {
-  @apply flex justify-between items-center mb-1;
+.meta-row-clickable {
+  @apply cursor-pointer;
 }
 
-.metadata-field-name {
-  @apply font-medium text-txt;
+.meta-row-clickable:hover {
+  @apply bg-accent-soft;
 }
 
-.metadata-field-value {
-  @apply font-mono text-2xs text-txt-muted break-all py-1 px-1.5 bg-bg rounded;
+.meta-row-clickable .meta-offset {
+  @apply text-accent;
 }
 
-.metadata-regions {
-  @apply p-2;
+.meta-key {
+  @apply text-txt-muted truncate;
 }
 
-.metadata-region {
-  @apply flex items-center gap-2 py-1.5 px-2 my-0.5 bg-bg-panel rounded cursor-pointer transition-colors;
+.meta-value {
+  @apply font-mono text-txt truncate;
 }
 
-.metadata-region:hover {
-  @apply bg-bg-hover;
+.meta-value.meta-hash {
+  @apply text-[10px] text-txt-muted select-all;
 }
 
-.metadata-region-color {
-  @apply w-3 h-3 rounded shrink-0;
+.meta-offset {
+  @apply font-mono text-[9px] text-txt-muted whitespace-nowrap;
 }
 
-.metadata-region-name {
-  @apply flex-1 font-medium;
-}
-
-.metadata-region-range {
-  @apply font-mono text-[10px] text-txt-muted;
-}
-
-.metadata-region-size {
-  @apply text-[10px] text-txt-muted min-w-[45px] text-right;
-}
 

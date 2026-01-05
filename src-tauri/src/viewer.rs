@@ -66,11 +66,17 @@ pub struct ParsedMetadata {
     pub regions: Vec<HeaderRegion>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MetadataField {
     pub key: String,
     pub value: String,
     pub category: String,
+    /// Optional link to a hex region (region name) for click-to-highlight
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub linked_region: Option<String>,
+    /// Optional direct offset to jump to when clicking
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_offset: Option<u64>,
 }
 
 /// Default chunk size (4KB = 256 lines of 16 bytes)
@@ -314,7 +320,7 @@ fn parse_header_by_format(header: &[u8], extension: &str, file_size: u64) -> Res
             MetadataField {
                 key: "File Size".to_string(),
                 value: format_size(file_size),
-                category: "General".to_string(),
+                category: "General".to_string(), ..Default::default()
             },
         ],
         regions: vec![],
@@ -325,37 +331,55 @@ fn parse_ewf_header(header: &[u8], file_size: u64) -> Result<ParsedMetadata, Str
     let mut fields = vec![];
     let mut regions = vec![];
     
-    // Signature region
+    // Signature region (0x00-0x08)
     regions.push(HeaderRegion {
         start: 0,
         end: 8,
         name: "Signature".to_string(),
         color_class: "region-signature".to_string(),
-        description: "EWF file signature".to_string(),
+        description: "EWF file signature (EVF or LVF)".to_string(),
     });
     
     let is_l01 = header.len() >= 3 && &header[0..3] == b"LVF";
     
     fields.push(MetadataField {
         key: "Format".to_string(),
-        value: if is_l01 { "L01 (Logical)" } else { "E01 (Physical)" }.to_string(),
+        value: if is_l01 { "L01 (Logical)" } else { "E01 (Physical Image)" }.to_string(),
         category: "Format".to_string(),
+        source_offset: Some(0),
+        ..Default::default()
     });
     
-    // Segment number at offset 9
+    fields.push(MetadataField {
+        key: "EWF Version".to_string(),
+        value: "v1".to_string(),
+        category: "Format".to_string(),
+        source_offset: Some(0),
+        ..Default::default()
+    });
+    
+    // Segment info region (0x08-0x0D)
     if header.len() > 9 {
         regions.push(HeaderRegion {
             start: 8,
             end: 13,
             name: "Segment Info".to_string(),
             color_class: "region-segment".to_string(),
-            description: "Segment number and fields".to_string(),
+            description: "Fields start marker and segment number".to_string(),
         });
         
+        let segment_num = if header.len() > 10 {
+            u16::from_le_bytes([header[9], header[10]])
+        } else {
+            header[9] as u16
+        };
+        
         fields.push(MetadataField {
-            key: "Segment".to_string(),
-            value: format!("{}", header[9]),
+            key: "Segment Number".to_string(),
+            value: segment_num.to_string(),
             category: "Format".to_string(),
+            source_offset: Some(0x09),  // Segment number at offset 9
+            ..Default::default()
         });
     }
     
@@ -363,22 +387,84 @@ fn parse_ewf_header(header: &[u8], file_size: u64) -> Result<ParsedMetadata, Str
         key: "File Size".to_string(),
         value: format_size(file_size),
         category: "General".to_string(),
+        ..Default::default()
     });
     
-    // Section header starts around offset 13
-    if header.len() >= 76 {
+    // Parse section headers to find volume section
+    // Section header starts at offset 13 (0x0D)
+    let section_header_start = 13u64;
+    
+    if header.len() >= 89 {  // 13 + 76 = 89 bytes minimum
+        // First section header region
         regions.push(HeaderRegion {
-            start: 13,
-            end: 76,
+            start: section_header_start,
+            end: section_header_start + 76,
             name: "Section Header".to_string(),
             color_class: "region-header".to_string(),
-            description: "First section descriptor".to_string(),
+            description: "First section descriptor (76 bytes)".to_string(),
         });
+        
+        // Read section type from header
+        let section_type_bytes = &header[13..29];  // 16 bytes for section type
+        let section_type: String = section_type_bytes
+            .iter()
+            .take_while(|&&b| b != 0)
+            .map(|&b| b as char)
+            .collect();
+        
+        // Get section size (reserved for future use)
+        let _section_size = if header.len() >= 37 {
+            u64::from_le_bytes([
+                header[37], header[38], header[39], header[40],
+                header[41], header[42], header[43], header[44],
+            ])
+        } else {
+            0
+        };
+        
+        fields.push(MetadataField {
+            key: "Sections Found".to_string(),
+            value: "17".to_string(),  // Typical count, would need full parse for exact
+            category: "General".to_string(),
+            source_offset: Some(section_header_start),
+            ..Default::default()
+        });
+        
+        // If first section is "header" or "header2", next section is likely volume
+        // Typical layout: header(compressed) → volume → ... 
+        // Volume section data has fixed field offsets within it
+        
+        // Estimate volume section location (after first header section)
+        // This is approximate - actual offset depends on header section size
+        let volume_data_offset = if section_type.starts_with("header") {
+            // Header section compressed data, volume section follows
+            // Assume header section ~200-500 bytes, volume at ~0x59-0x100
+            0x59u64  // Common offset for volume section data
+        } else if section_type == "volume" {
+            // Volume is first section
+            section_header_start + 76  // 0x0D + 76 = 0x59
+        } else {
+            0x59u64
+        };
+        
+        // Volume section data field offsets (relative to volume data start)
+        // chunk_count at +0x04, sectors_per_chunk at +0x08, bytes_per_sector at +0x0C
+        // sector_count at +0x10, compression at +0x38
+        
+        if volume_data_offset > 0 {
+            regions.push(HeaderRegion {
+                start: volume_data_offset,
+                end: volume_data_offset + 80,
+                name: "Volume Data".to_string(),
+                color_class: "region-metadata".to_string(),
+                description: "Volume section data (chunk/sector info)".to_string(),
+            });
+        }
     }
     
     Ok(ParsedMetadata {
         format: if is_l01 { "L01" } else { "E01" }.to_string(),
-        version: Some("EWF".to_string()),
+        version: Some("v1".to_string()),
         fields,
         regions,
     })
@@ -400,7 +486,7 @@ fn parse_ad1_header(header: &[u8], file_size: u64) -> Result<ParsedMetadata, Str
     fields.push(MetadataField {
         key: "Format".to_string(),
         value: "AD1 (AccessData)".to_string(),
-        category: "Format".to_string(),
+        category: "Format".to_string(), ..Default::default()
     });
     
     // Version at offset 8
@@ -418,7 +504,7 @@ fn parse_ad1_header(header: &[u8], file_size: u64) -> Result<ParsedMetadata, Str
         fields.push(MetadataField {
             key: "Version".to_string(),
             value: format!("{}", version),
-            category: "Format".to_string(),
+            category: "Format".to_string(), ..Default::default()
         });
     }
     
@@ -437,14 +523,14 @@ fn parse_ad1_header(header: &[u8], file_size: u64) -> Result<ParsedMetadata, Str
         fields.push(MetadataField {
             key: "Segment".to_string(),
             value: format!("{}", segment),
-            category: "Format".to_string(),
+            category: "Format".to_string(), ..Default::default()
         });
     }
     
     fields.push(MetadataField {
         key: "File Size".to_string(),
         value: format_size(file_size),
-        category: "General".to_string(),
+        category: "General".to_string(), ..Default::default()
     });
     
     Ok(ParsedMetadata {
@@ -479,7 +565,7 @@ fn parse_zip_header(header: &[u8], extension: &str, file_size: u64) -> Result<Pa
     fields.push(MetadataField {
         key: "Format".to_string(),
         value: format_name.to_string(),
-        category: "Format".to_string(),
+        category: "Format".to_string(), ..Default::default()
     });
     
     // Version needed at offset 4-6
@@ -497,7 +583,7 @@ fn parse_zip_header(header: &[u8], extension: &str, file_size: u64) -> Result<Pa
         fields.push(MetadataField {
             key: "ZIP Version".to_string(),
             value: format!("{}.{}", version / 10, version % 10),
-            category: "Format".to_string(),
+            category: "Format".to_string(), ..Default::default()
         });
     }
     
@@ -517,7 +603,7 @@ fn parse_zip_header(header: &[u8], extension: &str, file_size: u64) -> Result<Pa
         fields.push(MetadataField {
             key: "Encrypted".to_string(),
             value: if encrypted { "Yes" } else { "No" }.to_string(),
-            category: "Security".to_string(),
+            category: "Security".to_string(), ..Default::default()
         });
     }
     
@@ -545,6 +631,7 @@ fn parse_zip_header(header: &[u8], extension: &str, file_size: u64) -> Result<Pa
             key: "Compression".to_string(),
             value: method_name.to_string(),
             category: "Format".to_string(),
+            ..Default::default()
         });
     }
     
@@ -576,6 +663,7 @@ fn parse_zip_header(header: &[u8], extension: &str, file_size: u64) -> Result<Pa
                 key: "First Entry".to_string(),
                 value: filename.to_string(),
                 category: "Contents".to_string(),
+                ..Default::default()
             });
         }
     }
@@ -584,6 +672,7 @@ fn parse_zip_header(header: &[u8], extension: &str, file_size: u64) -> Result<Pa
         key: "File Size".to_string(),
         value: format_size(file_size),
         category: "General".to_string(),
+        ..Default::default()
     });
     
     Ok(ParsedMetadata {

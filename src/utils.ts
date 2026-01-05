@@ -91,3 +91,54 @@ export function debounce<T extends (...args: Parameters<T>) => void>(
     timeoutId = setTimeout(() => fn(...args), delay);
   };
 }
+
+/**
+ * Format a byte offset as a hexadecimal string.
+ * @param offset - The byte offset to format
+ * @param options - Formatting options
+ * @param options.width - Minimum width with zero-padding (default: 8)
+ * @param options.prefix - Whether to include '0x' prefix (default: false)
+ * @returns Formatted hex string (e.g., "0000A1B2" or "0x0000A1B2")
+ */
+export function formatOffset(
+  offset: number | undefined | null,
+  options: { width?: number; prefix?: boolean } = {}
+): string {
+  if (offset === undefined || offset === null) return "";
+  const { width = 8, prefix = false } = options;
+  const hex = offset.toString(16).toUpperCase().padStart(width, '0');
+  return prefix ? `0x${hex}` : hex;
+}
+
+/**
+ * Format a byte offset with "@ 0x" prefix for display in metadata panels.
+ * @param offset - The byte offset to format
+ * @returns Formatted string like "@ 0x0000A1B2" or empty string if null/undefined
+ */
+export function formatOffsetLabel(offset: number | undefined | null): string {
+  if (offset === undefined || offset === null) return "";
+  return `@ 0x${offset.toString(16).toUpperCase()}`;
+}
+
+/**
+ * Convert a single byte (0-255) to a 2-character uppercase hex string.
+ * @param byte - The byte value to convert
+ * @returns Formatted hex string (e.g., "0A", "FF")
+ */
+export function byteToHex(byte: number): string {
+  return byte.toString(16).toUpperCase().padStart(2, '0');
+}
+
+/**
+ * Convert a byte (0-255) to its ASCII character representation.
+ * Returns '.' for non-printable characters.
+ * @param byte - The byte value to convert
+ * @returns Single character string
+ */
+export function byteToAscii(byte: number): string {
+  // Printable ASCII range: 32-126
+  if (byte >= 32 && byte <= 126) {
+    return String.fromCharCode(byte);
+  }
+  return '.';
+}

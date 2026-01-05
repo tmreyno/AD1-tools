@@ -342,6 +342,8 @@ fn parse_simple_hash_file(content: &str, log_path: &Path) -> Option<StoredHash> 
         verified: None,
         timestamp,
         source: Some("companion".to_string()),
+        offset: None,  // Companion files don't have hex locations
+        size: None,
     })
 }
 
@@ -372,6 +374,8 @@ fn parse_hash_from_content(content: &str, log_path: &Path) -> Option<StoredHash>
         verified: None,
         timestamp,
         source: Some("companion".to_string()),
+        offset: None,
+        size: None,
     })
 }
 
@@ -403,6 +407,8 @@ fn parse_dc3dd_hash_line(line: &str) -> Option<StoredHash> {
                     verified: None,
                     timestamp: None,  // Will be set by caller from log file context
                     source: Some("companion".to_string()),
+                    offset: None,
+                    size: None,
                 });
             }
         }
@@ -464,6 +470,8 @@ fn parse_hash_line(line: &str, check_verified: bool) -> Option<StoredHash> {
                     verified,
                     timestamp: None,  // Will be set by caller from log file context
                     source: Some("companion".to_string()),
+                    offset: None,
+                    size: None,
                 });
             }
         }

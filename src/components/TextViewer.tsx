@@ -1,10 +1,9 @@
-import { createSignal, createEffect, Show, onCleanup } from "solid-js";
+import { createSignal, createEffect, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { DiscoveredFile } from "../types";
 
 // --- Constants ---
 const DEFAULT_MAX_CHARS = 100000; // 100KB of text
-const LINE_NUMBER_WIDTH = 6;
 
 interface TextViewerProps {
   file: DiscoveredFile;

@@ -579,6 +579,82 @@ impl EwfHandle {
         Ok(results.into_iter().map(|(_, data)| data).collect())
     }
 
+    // =========================================================================
+    // Random Access Methods (like libewf_handle_read_buffer_at_offset)
+    // =========================================================================
+
+    /// Get the total size of the decompressed image in bytes
+    pub fn get_media_size(&self) -> u64 {
+        self.volume.sector_count * self.volume.bytes_per_sector as u64
+    }
+
+    /// Get chunk size in bytes
+    pub fn get_chunk_size(&self) -> u32 {
+        self.volume.sectors_per_chunk * self.volume.bytes_per_sector
+    }
+
+    /// Read bytes at arbitrary offset from the decompressed image
+    /// This is the primary method for filesystem parsing
+    pub fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, String> {
+        let media_size = self.get_media_size();
+        let chunk_size = self.get_chunk_size() as u64;
+        
+        // Bounds check
+        if offset >= media_size {
+            return Err(format!("Offset {} beyond media size {}", offset, media_size));
+        }
+        
+        // Adjust length if it would read past end
+        let actual_length = std::cmp::min(length as u64, media_size - offset) as usize;
+        if actual_length == 0 {
+            return Ok(Vec::new());
+        }
+        
+        // Calculate which chunks we need
+        let start_chunk = (offset / chunk_size) as usize;
+        let end_offset = offset + actual_length as u64;
+        let end_chunk = ((end_offset + chunk_size - 1) / chunk_size) as usize;
+        let chunk_count = end_chunk - start_chunk;
+        
+        // Read all needed chunks
+        let chunks = if chunk_count > 1 {
+            self.read_chunks_batch(start_chunk, chunk_count)?
+        } else {
+            vec![self.read_chunk(start_chunk)?]
+        };
+        
+        // Concatenate chunk data
+        let mut all_data: Vec<u8> = Vec::with_capacity(chunk_count * chunk_size as usize);
+        for chunk in chunks {
+            all_data.extend_from_slice(&chunk);
+        }
+        
+        // Extract the requested byte range
+        let offset_in_first_chunk = (offset % chunk_size) as usize;
+        let end_pos = offset_in_first_chunk + actual_length;
+        
+        if end_pos > all_data.len() {
+            // Handle case where last chunk is smaller (end of media)
+            let available = all_data.len().saturating_sub(offset_in_first_chunk);
+            Ok(all_data[offset_in_first_chunk..offset_in_first_chunk + available].to_vec())
+        } else {
+            Ok(all_data[offset_in_first_chunk..end_pos].to_vec())
+        }
+    }
+
+    /// Read a single sector at the given sector index
+    pub fn read_sector(&mut self, sector_index: u64) -> Result<Vec<u8>, String> {
+        let offset = sector_index * self.volume.bytes_per_sector as u64;
+        self.read_at(offset, self.volume.bytes_per_sector as usize)
+    }
+
+    /// Read multiple consecutive sectors
+    pub fn read_sectors(&mut self, start_sector: u64, count: u64) -> Result<Vec<u8>, String> {
+        let offset = start_sector * self.volume.bytes_per_sector as u64;
+        let length = count as usize * self.volume.bytes_per_sector as usize;
+        self.read_at(offset, length)
+    }
+
     /// Read a chunk by global index (like libewf_handle_read_buffer)
     pub fn read_chunk(&mut self, chunk_index: usize) -> Result<Vec<u8>, String> {
         self.read_chunk_internal(chunk_index, true)
@@ -850,6 +926,8 @@ impl EwfHandle {
                     verified: None,
                     timestamp: None,
                     source: Some("container".to_string()),
+                    offset: Some(offset),
+                    size: Some(16),
                 });
             }
         }
@@ -869,6 +947,7 @@ impl EwfHandle {
             .map_err(|e| format!("Failed to seek to digest section: {}", e))?;
         
         let mut hashes = Vec::new();
+        let mut current_offset = offset;
         
         let mut md5_bytes = [0u8; 16];
         if file.read_exact(&mut md5_bytes).is_ok() && md5_bytes.iter().any(|&b| b != 0) {
@@ -881,7 +960,10 @@ impl EwfHandle {
                 verified: None,
                 timestamp: None,
                 source: Some("container".to_string()),
+                offset: Some(current_offset),
+                size: Some(16),
             });
+            current_offset += 16;
         }
         
         if size >= 36 {
@@ -896,6 +978,8 @@ impl EwfHandle {
                     verified: None,
                     timestamp: None,
                     source: Some("container".to_string()),
+                    offset: Some(current_offset),
+                    size: Some(20),
                 });
             }
         }

@@ -105,6 +105,11 @@ export type EwfInfo = {
   model?: string;
   serial_number?: string;
   stored_hashes?: StoredHash[];
+  // Section offsets for hex navigation
+  header_section_offset?: number;
+  volume_section_offset?: number;
+  hash_section_offset?: number;
+  digest_section_offset?: number;
 };
 
 /** @deprecated Use EwfInfo instead - L01 uses the same EWF format */
@@ -233,6 +238,10 @@ export type StoredHash = {
   source?: string | null;
   /** Filename this hash belongs to (for UFED which has per-file hashes) */
   filename?: string | null;
+  /** Byte offset in file where raw hash bytes are located */
+  offset?: number | null;
+  /** Size in bytes of the hash (MD5=16, SHA1=20, SHA256=32) */
+  size?: number | null;
 };
 
 export type SegmentHash = {
@@ -381,90 +390,57 @@ export type DbOpenTabRecord = {
 };
 
 // --- Project File Types ---
+// Project types are now defined in types/project.ts for comprehensive state management
+// Re-export for backward compatibility
+export * from './types/project';
 
-/** Project file format version for future compatibility */
-export const PROJECT_FILE_VERSION = 1;
+// --- Viewer Types (from viewer.rs) ---
 
-/** File extension for FFX project files */
-export const PROJECT_FILE_EXTENSION = ".ffxproj";
+/** A chunk of file data for hex viewer display */
+export type FileChunk = {
+  bytes: number[];
+  offset: number;
+  total_size: number;
+  has_more: boolean;
+  has_prev: boolean;
+};
 
-/** A saved project file structure */
-export type FFXProject = {
-  /** Project file format version */
-  version: number;
-  /** Project name (derived from directory name) */
+/** A highlighted region in the hex viewer */
+export type HeaderRegion = {
+  start: number;
+  end: number;
   name: string;
-  /** Root directory path that was opened */
-  root_path: string;
-  /** When the project was created */
-  created_at: string;
-  /** When the project was last saved */
-  saved_at: string;
-  /** Application version that created/saved this project */
-  app_version: string;
-  /** Open tabs state */
-  tabs: ProjectTab[];
-  /** Active tab file path (if any) */
-  active_tab_path: string | null;
-  /** Hash computation history */
-  hash_history: ProjectHashHistory;
-  /** UI state preferences */
-  ui_state: ProjectUIState;
-  /** User notes/annotations (future feature) */
-  notes?: string;
-  /** Custom tags/labels (future feature) */
-  tags?: string[];
+  /** CSS class name for coloring */
+  color_class: string;
+  description: string;
 };
 
-/** A tab in the saved project */
-export type ProjectTab = {
-  /** File path relative to root_path */
-  file_path: string;
-  /** Tab order (0-based) */
-  order: number;
+/** A parsed metadata field from a file header */
+export type MetadataField = {
+  key: string;
+  value: string;
+  category: string;
+  linked_region?: string;
+  source_offset?: number;
 };
 
-/** Hash history for the project */
-export type ProjectHashHistory = {
-  /** Map of file path to hash records */
-  files: Record<string, ProjectFileHashes>;
+/** Parsed metadata from a file header */
+export type ParsedMetadata = {
+  format: string;
+  version: string | null;
+  fields: MetadataField[];
+  regions: HeaderRegion[];
 };
 
-/** Hash records for a single file */
-export type ProjectFileHashes = {
-  /** Algorithm used */
-  algorithm: string;
-  /** Computed hash value */
-  hash_value: string;
-  /** When computed */
-  computed_at: string;
-  /** Verification status if verified */
-  verified?: {
-    result: "match" | "mismatch";
-    verified_at: string;
-  };
-}[];
-
-/** UI state to restore */
-export type ProjectUIState = {
-  /** Panel sizes (if adjustable) */
-  panel_sizes?: number[];
-  /** Expanded tree nodes */
-  expanded_paths?: string[];
-  /** Scroll positions */
-  scroll_positions?: Record<string, number>;
+/** File type detection result */
+export type FileTypeInfo = {
+  mime_type: string | null;
+  description: string;
+  extension: string;
+  is_text: boolean;
+  is_forensic_format: boolean;
+  magic_hex: string;
 };
 
-/** Result of loading a project */
-export type ProjectLoadResult = {
-  success: boolean;
-  project?: FFXProject;
-  error?: string;
-};
-
-/** Result of saving a project */
-export type ProjectSaveResult = {
-  success: boolean;
-  path?: string;
-  error?: string;
-};
+// Re-export processed database types
+export * from './types/processed';

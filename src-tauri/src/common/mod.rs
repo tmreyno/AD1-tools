@@ -7,6 +7,8 @@ pub mod io_pool;
 pub mod hex;
 pub mod magic;
 pub mod entropy;
+pub mod path_security;
+pub mod audit;
 
 // Re-exports for convenience
 pub use hash::{HashAlgorithm, StreamingHasher, compute_hash, hash_file_with_progress};
@@ -17,6 +19,8 @@ pub use io_pool::{FileIoPool, DEFAULT_MAX_OPEN_FILES};
 pub use hex::{format_hex_dump, format_hex_inline, format_hex_string, HexDumpOptions, HexDumpResult};
 pub use magic::{detect_file_type, FileType, FileCategory, is_image, is_archive, is_executable};
 pub use entropy::{calculate_entropy, classify_entropy, EntropyClass, EntropyResult, is_likely_encrypted};
+pub use path_security::{safe_join, sanitize_filename, is_safe_path, contains_traversal_pattern};
+pub use audit::{log_evidence_access, log_hash_verification, log_container_opened, log_report_generation, log_security_event};
 
 // Shared constants - tuned for high throughput sequential I/O
 // 16MB buffer provides optimal throughput for modern NVMe SSDs and HDDs

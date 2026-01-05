@@ -1,46 +1,10 @@
-import { createSignal, createEffect, For, Show, onCleanup } from "solid-js";
+import { createSignal, createEffect, createMemo, For, Show, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { DiscoveredFile } from "../types";
+import type { DiscoveredFile, FileChunk, HeaderRegion, MetadataField, ParsedMetadata, FileTypeInfo } from "../types";
+import { formatOffset, byteToHex, byteToAscii, formatBytes } from "../utils";
 
-// --- Types from viewer.rs ---
-
-interface FileChunk {
-  bytes: number[];
-  offset: number;
-  total_size: number;
-  has_more: boolean;
-  has_prev: boolean;
-}
-
-interface HeaderRegion {
-  start: number;
-  end: number;
-  name: string;
-  color_class: string;  // CSS class name for coloring
-  description: string;
-}
-
-interface MetadataField {
-  key: string;
-  value: string;
-  category: string;
-}
-
-interface ParsedMetadata {
-  format: string;
-  version: string | null;
-  fields: MetadataField[];
-  regions: HeaderRegion[];
-}
-
-interface FileTypeInfo {
-  mime_type: string | null;
-  description: string;
-  extension: string;
-  is_text: boolean;
-  is_forensic_format: boolean;
-  magic_hex: string;
-}
+// Re-export viewer types for backward compatibility
+export type { FileChunk, HeaderRegion, MetadataField, ParsedMetadata, FileTypeInfo };
 
 // --- Constants ---
 const BYTES_PER_LINE = 16;
@@ -48,46 +12,24 @@ const DEFAULT_CHUNK_SIZE = 4096; // 256 lines
 const MIN_CHUNK_SIZE = 256;
 const MAX_CHUNK_SIZE = 65536;
 
-// Map color classes to actual colors
+// Map color classes to actual colors (with very light transparency)
 const COLOR_MAP: Record<string, string> = {
-  "region-signature": "#ef4444",    // Red - file signatures
-  "region-header": "#f97316",       // Orange - headers
-  "region-segment": "#f97316",      // Orange - segments
-  "region-metadata": "#eab308",     // Yellow - metadata
-  "region-data": "#22c55e",         // Green - data sections
-  "region-checksum": "#3b82f6",     // Blue - checksums
-  "region-reserved": "#8b5cf6",     // Purple - reserved
-  "region-footer": "#ec4899",       // Pink - footers
+  "region-signature": "rgba(239, 68, 68, 0.15)",    // Red - file signatures
+  "region-header": "rgba(249, 115, 22, 0.15)",      // Orange - headers
+  "region-segment": "rgba(249, 115, 22, 0.15)",     // Orange - segments
+  "region-metadata": "rgba(234, 179, 8, 0.15)",     // Yellow - metadata
+  "region-data": "rgba(34, 197, 94, 0.15)",         // Green - data sections
+  "region-checksum": "rgba(59, 130, 246, 0.15)",    // Blue - checksums
+  "region-reserved": "rgba(139, 92, 246, 0.15)",    // Purple - reserved
+  "region-footer": "rgba(236, 72, 153, 0.15)",      // Pink - footers
 };
+
+// Selected/navigated location color (darker transparent green)
+const NAVIGATED_COLOR = "rgba(34, 197, 94, 0.4)";  // Darker green for navigated location
 
 // Helper to get actual color from color_class
 function getRegionColor(colorClass: string): string {
   return COLOR_MAP[colorClass] || "#6a6a7a";
-}
-
-// --- Helper Functions ---
-
-function formatOffset(offset: number, width: number = 8): string {
-  return offset.toString(16).toUpperCase().padStart(width, '0');
-}
-
-function byteToHex(byte: number): string {
-  return byte.toString(16).toUpperCase().padStart(2, '0');
-}
-
-function byteToAscii(byte: number): string {
-  // Printable ASCII range: 32-126
-  if (byte >= 32 && byte <= 126) {
-    return String.fromCharCode(byte);
-  }
-  return '.';
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 // --- Component Props ---
@@ -96,6 +38,8 @@ interface HexViewerProps {
   file: DiscoveredFile;
   /** Callback when metadata is loaded (for right panel) */
   onMetadataLoaded?: (metadata: ParsedMetadata | null) => void;
+  /** Callback to expose navigation function to parent (offset, optional size in bytes) */
+  onNavigatorReady?: (navigateTo: (offset: number, size?: number) => void) => void;
 }
 
 export function HexViewer(props: HexViewerProps) {
@@ -114,17 +58,28 @@ export function HexViewer(props: HexViewerProps) {
   // View options
   const [showAscii, setShowAscii] = createSignal(true);
   const [highlightRegions, setHighlightRegions] = createSignal(true);
-  const [showAddress, setShowAddress] = createSignal(true);
+  const [showAddress, _setShowAddress] = createSignal(true);
+  
+  // Selection/focus state
+  const [selectedRegion, setSelectedRegion] = createSignal<HeaderRegion | null>(null);
+  const [hoveredOffset, setHoveredOffset] = createSignal<number | null>(null);
+  // Track navigated location - offset and size (default to 1 byte if size not specified)
+  const [navigatedRange, setNavigatedRange] = createSignal<{ offset: number; size: number } | null>(null);
   
   // Load file data
-  const loadChunk = async (offset: number) => {
+  const loadChunk = async (chunkOffset: number) => {
+    // Validate offset before making Tauri call
+    const validOffset = typeof chunkOffset === 'number' && !isNaN(chunkOffset) && chunkOffset >= 0
+      ? Math.floor(chunkOffset)
+      : 0;
+    
     setLoading(true);
     setError(null);
     
     try {
       const result = await invoke<FileChunk>("viewer_read_chunk", {
         path: props.file.path,
-        offset,
+        offset: validOffset,
         size: chunkSize()
       });
       setChunk(result);
@@ -174,6 +129,18 @@ export function HexViewer(props: HexViewerProps) {
       });
   });
   
+  // Expose navigation function to parent when ready (only once when mounted)
+  if (props.onNavigatorReady) {
+    props.onNavigatorReady((offset: number, size?: number) => {
+      // Ensure offset is valid before loading
+      if (typeof offset === 'number' && !isNaN(offset) && offset >= 0) {
+        // Track the navigated location with size (default to 4 bytes for visibility)
+        setNavigatedRange({ offset, size: size ?? 4 });
+        loadChunk(offset);
+      }
+    });
+  }
+  
   // Navigation handlers
   const goToStart = () => loadChunk(0);
   const goToEnd = () => {
@@ -220,48 +187,46 @@ export function HexViewer(props: HexViewerProps) {
     setGotoOffset("");
   };
   
-  // Get color for a byte based on metadata regions
-  const getByteColor = (byteOffset: number): string | null => {
-    if (!highlightRegions()) return null;
-    
-    const meta = metadata();
-    if (!meta) return null;
-    
-    for (const region of meta.regions) {
-      if (byteOffset >= region.start && byteOffset < region.end) {
-        return getRegionColor(region.color_class);
-      }
-    }
-    return null;
-  };
-  
-  // Get region name for tooltip
-  const getByteRegion = (byteOffset: number): HeaderRegion | null => {
-    const meta = metadata();
-    if (!meta) return null;
-    
-    for (const region of meta.regions) {
-      if (byteOffset >= region.start && byteOffset < region.end) {
-        return region;
-      }
-    }
-    return null;
-  };
-  
-  // Render hex lines
-  const renderHexLines = () => {
+  // Render hex lines with highlight data (memo to track metadata changes)
+  const hexLines = createMemo(() => {
     const c = chunk();
+    const meta = metadata();  // Track metadata changes
+    const doHighlight = highlightRegions();
+    
     if (!c) return [];
     
-    const lines: { offset: number; bytes: number[] }[] = [];
+    const lines: { 
+      offset: number; 
+      bytes: { value: number; color: string | null; region: HeaderRegion | null }[] 
+    }[] = [];
+    
     for (let i = 0; i < c.bytes.length; i += BYTES_PER_LINE) {
+      const lineBytes = c.bytes.slice(i, i + BYTES_PER_LINE);
+      const lineOffset = c.offset + i;
+      
       lines.push({
-        offset: c.offset + i,
-        bytes: c.bytes.slice(i, i + BYTES_PER_LINE)
+        offset: lineOffset,
+        bytes: lineBytes.map((byte, j) => {
+          const byteOffset = lineOffset + j;
+          let color: string | null = null;
+          let region: HeaderRegion | null = null;
+          
+          if (doHighlight && meta) {
+            for (const r of meta.regions) {
+              if (byteOffset >= r.start && byteOffset < r.end) {
+                color = getRegionColor(r.color_class);
+                region = r;
+                break;
+              }
+            }
+          }
+          
+          return { value: byte, color, region };
+        })
       });
     }
     return lines;
-  };
+  });
   
   // Keyboard navigation
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -301,7 +266,7 @@ export function HexViewer(props: HexViewerProps) {
           <Show when={chunk()}>
             {c => (
               <span class="hex-file-size">
-                {formatFileSize(c().total_size)}
+                {formatBytes(c().total_size)}
               </span>
             )}
           </Show>
@@ -400,29 +365,34 @@ export function HexViewer(props: HexViewerProps) {
             <option value={16384}>16 KB</option>
             <option value={MAX_CHUNK_SIZE}>64 KB</option>
           </select>
+          
+          {/* Region jump dropdown */}
+          <Show when={highlightRegions() && metadata()?.regions.length}>
+            <select
+              class="hex-region-select"
+              onChange={e => {
+                const idx = parseInt(e.currentTarget.value);
+                const regions = metadata()?.regions;
+                if (!isNaN(idx) && regions && regions[idx]) {
+                  const region = regions[idx];
+                  setSelectedRegion(region);
+                  loadChunk(region.start);
+                }
+                e.currentTarget.value = ""; // Reset selection
+              }}
+            >
+              <option value="">Jump to region...</option>
+              <For each={metadata()?.regions}>
+                {(region, idx) => (
+                  <option value={idx()}>
+                    {region.name} (0x{formatOffset(region.start, { width: 4 })})
+                  </option>
+                )}
+              </For>
+            </select>
+          </Show>
         </div>
       </div>
-      
-      {/* Legend for highlighted regions */}
-      <Show when={highlightRegions() && metadata()?.regions.length}>
-        <div class="hex-legend">
-          <For each={metadata()?.regions}>
-            {region => {
-              const color = getRegionColor(region.color_class);
-              return (
-                <span 
-                  class="hex-legend-item" 
-                  style={{ "--region-color": color }}
-                  title={region.description}
-                >
-                  <span class="hex-legend-color" style={{ background: color }}></span>
-                  {region.name}
-                </span>
-              );
-            }}
-          </For>
-        </div>
-      </Show>
       
       {/* Error display */}
       <Show when={error()}>
@@ -454,7 +424,7 @@ export function HexViewer(props: HexViewerProps) {
           
           {/* Lines */}
           <div class="hex-lines">
-            <For each={renderHexLines()}>
+            <For each={hexLines()}>
               {line => (
                 <div class="hex-line">
                   <Show when={showAddress()}>
@@ -465,21 +435,45 @@ export function HexViewer(props: HexViewerProps) {
                   
                   <span class="hex-bytes">
                     <For each={line.bytes}>
-                      {(byte, i) => {
-                        const byteOffset = line.offset + i();
-                        const color = getByteColor(byteOffset);
-                        const region = getByteRegion(byteOffset);
+                      {(byteData, byteIdx) => {
+                        const byteOffset = line.offset + byteIdx();
+                        const isInSelectedRegion = () => {
+                          const sel = selectedRegion();
+                          return !!(sel && byteOffset >= sel.start && byteOffset <= sel.end);
+                        };
+                        const isHovered = () => hoveredOffset() === byteOffset;
+                        const isNavigated = () => {
+                          const nav = navigatedRange();
+                          // Highlight only the specific bytes in the navigated range
+                          return nav !== null && 
+                            byteOffset >= nav.offset && 
+                            byteOffset < nav.offset + nav.size;
+                        };
+                        
+                        // Get background color - navigated takes precedence
+                        const bgColor = () => {
+                          if (isNavigated()) return NAVIGATED_COLOR;
+                          return byteData.color || undefined;
+                        };
+                        
                         return (
                           <span 
                             class="hex-byte"
-                            classList={{ 'highlighted': !!color }}
-                            style={color ? { 
-                              background: color, 
-                              color: '#fff' 
+                            classList={{ 
+                              'highlighted': !!byteData.color || isNavigated(),
+                              'selected-region': isInSelectedRegion(),
+                              'hovered': isHovered(),
+                              'navigated': isNavigated()
+                            }}
+                            style={bgColor() ? { 
+                              "background-color": bgColor()
                             } : {}}
-                            title={region ? `${region.name}: ${region.description}` : `Offset: 0x${formatOffset(byteOffset)}`}
+                            title={byteData.region ? `${byteData.region.name}: ${byteData.region.description}` : undefined}
+                            onMouseEnter={() => setHoveredOffset(byteOffset)}
+                            onMouseLeave={() => setHoveredOffset(null)}
+                            onClick={() => setNavigatedRange(null)}  // Clear navigation highlight on click
                           >
-                            {byteToHex(byte)}
+                            {byteToHex(byteData.value)}
                           </span>
                         );
                       }}
@@ -493,16 +487,39 @@ export function HexViewer(props: HexViewerProps) {
                   <Show when={showAscii()}>
                     <span class="hex-ascii">
                       <For each={line.bytes}>
-                        {(byte, i) => {
-                          const byteOffset = line.offset + i();
-                          const color = getByteColor(byteOffset);
+                        {(byteData, byteIdx) => {
+                          const byteOffset = line.offset + byteIdx();
+                          const isInSelectedRegion = () => {
+                            const sel = selectedRegion();
+                            return !!(sel && byteOffset >= sel.start && byteOffset <= sel.end);
+                          };
+                          const isHovered = () => hoveredOffset() === byteOffset;
+                          const isNavigated = () => {
+                            const nav = navigatedRange();
+                            return nav !== null && 
+                              byteOffset >= nav.offset && 
+                              byteOffset < nav.offset + nav.size;
+                          };
+                          
+                          const bgColor = () => {
+                            if (isNavigated()) return NAVIGATED_COLOR;
+                            return byteData.color || undefined;
+                          };
+                          
                           return (
                             <span 
                               class="hex-ascii-char"
-                              classList={{ 'highlighted': !!color }}
-                              style={color ? { background: color, color: '#fff' } : {}}
+                              classList={{ 
+                                'highlighted': !!byteData.color || isNavigated(),
+                                'selected-region': isInSelectedRegion(),
+                                'hovered': isHovered(),
+                                'navigated': isNavigated()
+                              }}
+                              style={bgColor() ? { "background-color": bgColor() } : {}}
+                              onMouseEnter={() => setHoveredOffset(byteOffset)}
+                              onMouseLeave={() => setHoveredOffset(null)}
                             >
-                              {byteToAscii(byte)}
+                              {byteToAscii(byteData.value)}
                             </span>
                           );
                         }}
@@ -525,5 +542,3 @@ export function HexViewer(props: HexViewerProps) {
     </div>
   );
 }
-
-export type { ParsedMetadata, FileTypeInfo, HeaderRegion, MetadataField };

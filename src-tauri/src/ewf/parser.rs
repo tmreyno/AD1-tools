@@ -708,6 +708,17 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
     let mut fields = Vec::new();
     let mut regions = Vec::new();
     
+    // Find section offsets for linking metadata fields to hex positions
+    let header_offset = info.sections.iter()
+        .find(|s| s.section_type == "header2" || s.section_type == "header")
+        .map(|s| s.file_offset);
+    let volume_offset = info.sections.iter()
+        .find(|s| s.section_type == "volume")
+        .map(|s| s.file_offset);
+    let hash_offset = info.sections.iter()
+        .find(|s| s.section_type == "hash" || s.section_type == "digest")
+        .map(|s| s.file_offset);
+    
     // ---- Format Information ----
     let format_desc = match info.variant {
         EwfVariant::E01 => "E01 (Physical Image)",
@@ -721,30 +732,38 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
         key: "Format".to_string(),
         value: format_desc.to_string(),
         category: "Format".to_string(),
+        linked_region: Some("signature".to_string()),
+        source_offset: Some(0),
     });
     
     fields.push(MetadataField {
         key: "EWF Version".to_string(),
         value: format!("v{}", info.version),
         category: "Format".to_string(),
+        linked_region: Some("signature".to_string()),
+        source_offset: Some(0),
     });
     
     fields.push(MetadataField {
         key: "Segment Number".to_string(),
         value: format!("{}", info.segment_number),
         category: "Format".to_string(),
+        linked_region: Some("segment".to_string()),
+        source_offset: Some(8),
     });
     
     fields.push(MetadataField {
         key: "File Size".to_string(),
         value: format_size(info.file_size),
         category: "Format".to_string(),
+        ..Default::default()
     });
     
     fields.push(MetadataField {
         key: "Sections Found".to_string(),
         value: format!("{}", info.sections.len()),
         category: "Format".to_string(),
+        ..Default::default()
     });
     
     // ---- Header Regions ----
@@ -847,6 +866,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Description".to_string(),
             value: desc.clone(),
             category: "Case Info".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -855,6 +876,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Case Number".to_string(),
             value: case_num.clone(),
             category: "Case Info".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -863,6 +886,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Evidence Number".to_string(),
             value: evidence_num.clone(),
             category: "Case Info".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -871,6 +896,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Examiner".to_string(),
             value: examiner.clone(),
             category: "Case Info".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -879,6 +906,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Notes".to_string(),
             value: notes.clone(),
             category: "Case Info".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -887,6 +916,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Acquisition Date".to_string(),
             value: acq_date.clone(),
             category: "Acquisition".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -895,6 +926,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Acquisition Software".to_string(),
             value: acq_sw.clone(),
             category: "Acquisition".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -903,6 +936,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Acquisition OS".to_string(),
             value: acq_os.clone(),
             category: "Acquisition".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -912,6 +947,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Device Model".to_string(),
             value: model.clone(),
             category: "Device".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -920,6 +957,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Serial Number".to_string(),
             value: serial.clone(),
             category: "Device".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -928,6 +967,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Total Bytes".to_string(),
             value: format_size(total_bytes),
             category: "Device".to_string(),
+            linked_region: Some("header".to_string()),
+            source_offset: header_offset,
         });
     }
     
@@ -937,24 +978,32 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Chunk Count".to_string(),
             value: format!("{}", volume.chunk_count),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         fields.push(MetadataField {
             key: "Sectors per Chunk".to_string(),
             value: format!("{}", volume.sectors_per_chunk),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         fields.push(MetadataField {
             key: "Bytes per Sector".to_string(),
             value: format!("{}", volume.bytes_per_sector),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         fields.push(MetadataField {
             key: "Total Sectors".to_string(),
             value: format!("{}", volume.sector_count),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         let image_size = volume.sector_count * volume.bytes_per_sector as u64;
@@ -962,24 +1011,32 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "Image Size".to_string(),
             value: format_size(image_size),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         fields.push(MetadataField {
             key: "Chunk Size".to_string(),
             value: format_size((volume.sectors_per_chunk * volume.bytes_per_sector) as u64),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         fields.push(MetadataField {
             key: "Media Type".to_string(),
             value: format_media_type(volume.media_type).to_string(),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         fields.push(MetadataField {
             key: "Compression".to_string(),
             value: format_compression(volume.compression_level),
             category: "Volume".to_string(),
+            linked_region: Some("volume".to_string()),
+            source_offset: volume_offset,
         });
         
         if volume.chs_cylinders > 0 {
@@ -987,6 +1044,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
                 key: "CHS Geometry".to_string(),
                 value: format!("{} / {} / {}", volume.chs_cylinders, volume.chs_heads, volume.chs_sectors),
                 category: "Volume".to_string(),
+                linked_region: Some("volume".to_string()),
+                source_offset: volume_offset,
             });
         }
         
@@ -995,6 +1054,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
                 key: "GUID".to_string(),
                 value: guid.clone(),
                 category: "Volume".to_string(),
+                linked_region: Some("volume".to_string()),
+                source_offset: volume_offset,
             });
         }
     }
@@ -1005,6 +1066,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "MD5".to_string(),
             value: md5.clone(),
             category: "Hashes".to_string(),
+            linked_region: Some("hash".to_string()),
+            source_offset: hash_offset,
         });
     }
     
@@ -1013,6 +1076,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "SHA1".to_string(),
             value: sha1.clone(),
             category: "Hashes".to_string(),
+            linked_region: Some("hash".to_string()),
+            source_offset: hash_offset,
         });
     }
     
@@ -1021,6 +1086,8 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             key: "SHA256".to_string(),
             value: sha256.clone(),
             category: "Hashes".to_string(),
+            linked_region: Some("hash".to_string()),
+            source_offset: hash_offset,
         });
     }
     
@@ -1029,7 +1096,7 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
         fields.push(MetadataField {
             key: "Acquisition Errors".to_string(),
             value: format!("{} error regions", info.errors.len()),
-            category: "Errors".to_string(),
+            category: "Errors".to_string(), ..Default::default()
         });
         
         // Show first few errors
@@ -1041,7 +1108,7 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
                     error.first_sector + error.sector_count - 1,
                     error.sector_count
                 ),
-                category: "Errors".to_string(),
+                category: "Errors".to_string(), ..Default::default()
             });
         }
         
@@ -1049,7 +1116,7 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
             fields.push(MetadataField {
                 key: "...".to_string(),
                 value: format!("and {} more error regions", info.errors.len() - 5),
-                category: "Errors".to_string(),
+                category: "Errors".to_string(), ..Default::default()
             });
         }
     }
@@ -1057,13 +1124,11 @@ pub fn ewf_detailed_info_to_metadata(info: &EwfDetailedInfo) -> ParsedMetadata {
     // ---- Section List ----
     for (i, section) in info.sections.iter().enumerate() {
         fields.push(MetadataField {
-            key: format!("Section {}", i + 1),
-            value: format!("{} @ 0x{:X} ({} bytes)", 
-                section.section_type, 
-                section.file_offset,
-                section.section_size
-            ),
+            key: format!("Section {}: {}", i + 1, section.section_type),
+            value: format!("{} bytes", section.section_size),
             category: "Sections".to_string(),
+            linked_region: Some(section.section_type.clone()),
+            source_offset: Some(section.file_offset),
         });
     }
     

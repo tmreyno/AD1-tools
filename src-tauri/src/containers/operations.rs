@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::ad1;
 use crate::archive;
+use crate::common::audit::{log_evidence_access, log_data_export};
 use crate::ewf;
 use crate::raw;
 use crate::ufed;
@@ -18,6 +19,8 @@ use super::companion::find_companion_log;
 /// Use this for quick container listing/display
 pub fn info_fast(path: &str) -> Result<ContainerInfo, String> {
     debug!("info_fast: loading {}", path);
+    // Audit log: evidence container access
+    log_evidence_access("info_fast", Path::new(path), None, None);
     let kind = detect_container(path).map_err(|e| {
         debug!("info_fast: detect_container failed for {}: {}", path, e);
         e
@@ -115,6 +118,9 @@ pub fn info_fast(path: &str) -> Result<ContainerInfo, String> {
 
 /// Full info - reads headers and optionally parses item trees
 pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
+    // Audit log: evidence container access (full info)
+    log_evidence_access("info", Path::new(path), None, None);
+    
     let kind = detect_container(path)?;
     let companion_log = find_companion_log(path);
     
@@ -209,6 +215,9 @@ pub fn info(path: &str, include_tree: bool) -> Result<ContainerInfo, String> {
 
 /// Verify container integrity using the specified hash algorithm
 pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
+    // Audit log: verification operation
+    log_evidence_access("verify", Path::new(path), Some(algorithm), None);
+    
     match detect_container(path)? {
         ContainerKind::Ad1 => {
             let ad1_results = ad1::verify(path, algorithm)?;
@@ -254,6 +263,14 @@ pub fn verify(path: &str, algorithm: &str) -> Result<Vec<VerifyEntry>, String> {
 
 /// Extract container contents to the specified output directory
 pub fn extract(path: &str, output_dir: &str) -> Result<(), String> {
+    // Audit log: extraction operation (sensitive - exports evidence)
+    // Note: bytes_exported is 0 here as we don't know total size yet
+    log_data_export(
+        Path::new(path),
+        Path::new(output_dir),
+        0, // Size determined during extraction
+    );
+    
     match detect_container(path)? {
         ContainerKind::Ad1 => ad1::extract(path, output_dir),
         ContainerKind::E01 => ewf::extract(path, output_dir),

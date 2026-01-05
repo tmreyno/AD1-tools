@@ -21,6 +21,10 @@ pub struct StoredHash {
     pub timestamp: Option<String>,
     /// Where hash came from: "container", "companion", "computed"
     pub source: Option<String>,
+    /// Byte offset in file where the raw hash bytes are located
+    pub offset: Option<u64>,
+    /// Size in bytes of the hash (MD5=16, SHA1=20, SHA256=32)
+    pub size: Option<u64>,
 }
 
 /// Per-segment hash information from companion log files
