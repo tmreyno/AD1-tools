@@ -1,6 +1,7 @@
 import { onMount, onCleanup, createSignal, createEffect, Show } from "solid-js";
 import { useFileManager, useHashManager, useDatabase, useProject, useProcessedDatabases } from "./hooks";
-import { Toolbar, StatusBar, FilePanel, DetailPanel, TreePanel, ProgressModal, MetadataPanel, ReportWizard } from "./components";
+import { Toolbar, StatusBar, FilePanel, DetailPanel, TreePanel, ProgressModal, MetadataPanel, ReportWizard, ProjectSetupWizard } from "./components";
+import type { ProjectLocations } from "./components";
 import ProcessedDatabasePanel from "./components/ProcessedDatabasePanel";
 import ProcessedDetailPanel from "./components/ProcessedDetailPanel";
 import type { ParsedMetadata, TabViewMode } from "./components";
@@ -34,7 +35,7 @@ function App() {
   
   // Clear metadata when active file changes
   createEffect(() => {
-    const _file = fileManager.activeFile(); // Track active file
+    void fileManager.activeFile(); // Track active file
     // Clear hex metadata when file changes - new file needs fresh parsing
     setHexMetadata(null);
     // Also reset view mode to info when switching files
@@ -54,6 +55,10 @@ function App() {
   
   // Report wizard state
   const [showReportWizard, setShowReportWizard] = createSignal(false);
+  
+  // Project Setup Wizard state
+  const [showProjectWizard, setShowProjectWizard] = createSignal(false);
+  const [pendingProjectRoot, setPendingProjectRoot] = createSignal<string | null>(null);
   
   // Left panel tab state: "evidence" or "processed"
   const [leftPanelTab, setLeftPanelTab] = createSignal<"evidence" | "processed">("evidence");
@@ -202,8 +207,64 @@ function App() {
     return fileManager.fileInfoMap().get(active.path);
   };
 
+  // Handler for opening a project directory - shows the setup wizard
+  const handleOpenDirectory = async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    try {
+      const selected = await open({ 
+        title: "Select Project Directory", 
+        multiple: false, 
+        directory: true 
+      });
+      if (selected) {
+        setPendingProjectRoot(selected);
+        setShowProjectWizard(true);
+      }
+    } catch (err) {
+      console.error("Failed to open directory:", err);
+    }
+  };
+
+  // Handler for when project setup wizard completes
+  const handleProjectSetupComplete = async (locations: ProjectLocations) => {
+    setShowProjectWizard(false);
+    
+    // Set the evidence path and scan for files
+    fileManager.setScanDir(locations.evidencePath);
+    await fileManager.scanForFiles(locations.evidencePath);
+    
+    // If processed databases were discovered, add them
+    if (locations.discoveredDatabases.length > 0) {
+      // Switch to processed tab if databases found
+      // Add discovered processed databases to the manager
+      processedDbManager.addDatabases(locations.discoveredDatabases);
+      // Select the first discovered database to show details
+      await processedDbManager.selectDatabase(locations.discoveredDatabases[0]);
+      // Switch to processed tab
+      setLeftPanelTab("processed");
+      console.log(`Found ${locations.discoveredDatabases.length} processed databases in: ${locations.processedDbPath}`);
+    }
+    
+    // Log the project setup
+    projectManager.logActivity('project', 'setup', 
+      `Project setup complete: Evidence=${locations.evidencePath}, Processed=${locations.processedDbPath}`);
+    
+    setPendingProjectRoot(null);
+  };
+
   return (
     <div class="app-root" classList={{ 'is-resizing': dragging() !== null }}>
+      {/* Project Setup Wizard */}
+      <ProjectSetupWizard
+        projectRoot={pendingProjectRoot() || ''}
+        isOpen={showProjectWizard()}
+        onClose={() => {
+          setShowProjectWizard(false);
+          setPendingProjectRoot(null);
+        }}
+        onComplete={handleProjectSetupComplete}
+      />
+      
       {/* Header */}
       <header class="app-header">
         <div class="brand">
@@ -228,7 +289,7 @@ function App() {
         selectedCount={fileManager.selectedCount()}
         discoveredCount={fileManager.discoveredFiles().length}
         busy={fileManager.busy()}
-        onBrowse={() => fileManager.browseScanDir()}
+        onBrowse={handleOpenDirectory}
         onScan={() => fileManager.scanForFiles()}
         onHashSelected={() => hashManager.hashSelectedFiles()}
         onLoadAll={() => fileManager.loadAllInfo()}

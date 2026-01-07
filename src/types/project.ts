@@ -403,6 +403,24 @@ export interface FilterState {
 // DIRECTORIES & PATHS
 // -----------------------------------------------------------------------------
 
+/** Project locations configuration (set during project setup wizard) */
+export interface ProjectLocations {
+  /** Root project directory */
+  project_root: string;
+  /** Path to evidence files directory */
+  evidence_path: string;
+  /** Path to processed databases directory */
+  processed_db_path: string;
+  /** Whether locations were auto-discovered or manually set */
+  auto_discovered: boolean;
+  /** When locations were configured */
+  configured_at: string;
+  /** Count of discovered evidence files */
+  evidence_file_count?: number;
+  /** Count of discovered processed databases */
+  processed_db_count?: number;
+}
+
 /** Open directory state */
 export interface OpenDirectory {
   /** Directory path */
@@ -472,6 +490,8 @@ export interface FFXProject {
   activity_log_limit?: number;
 
   // === Evidence State ===
+  /** Project locations (evidence, processed databases) */
+  locations?: ProjectLocations;
   /** Open directories */
   open_directories: OpenDirectory[];
   /** Recent directories */

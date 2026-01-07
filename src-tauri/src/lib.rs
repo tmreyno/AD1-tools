@@ -204,6 +204,72 @@ async fn scan_directory_streaming(
     result
 }
 
+// ============================================================================
+// Path and Discovery Utilities - for Project Setup Wizard
+// ============================================================================
+
+/// Check if a path exists (file or directory)
+#[tauri::command]
+fn path_exists(path: String) -> Result<bool, String> {
+    let path = std::path::PathBuf::from(&path);
+    Ok(path.exists())
+}
+
+/// Check if a path is a directory
+#[tauri::command]
+fn path_is_directory(path: String) -> Result<bool, String> {
+    let path = std::path::PathBuf::from(&path);
+    Ok(path.is_dir())
+}
+
+/// Discover evidence files (E01, AD1, L01, etc.) in a directory
+/// Returns just the file paths for quick discovery
+#[tauri::command]
+fn discover_evidence_files(
+    #[allow(non_snake_case)]
+    dirPath: String,
+    recursive: bool,
+) -> Result<Vec<String>, String> {
+    let path = std::path::PathBuf::from(&dirPath);
+    
+    if !path.exists() {
+        return Err(format!("Path does not exist: {}", path.display()));
+    }
+    
+    if !path.is_dir() {
+        return Err(format!("Path is not a directory: {}", path.display()));
+    }
+    
+    let files = if recursive {
+        containers::scan_directory_recursive(&dirPath)?
+    } else {
+        containers::scan_directory(&dirPath)?
+    };
+    
+    Ok(files.into_iter().map(|f| f.path).collect())
+}
+
+/// Scan for processed databases (AXIOM, Cellebrite, etc.) and return them
+/// Returns ProcessedDbInfo directly (can be converted to ProcessedDatabase in frontend)
+#[tauri::command]
+fn scan_for_processed_databases(
+    #[allow(non_snake_case)]
+    dirPath: String,
+) -> Result<Vec<processed::types::ProcessedDbInfo>, String> {
+    use std::path::PathBuf;
+    
+    let path = PathBuf::from(&dirPath);
+    
+    if !path.exists() {
+        return Err(format!("Path does not exist: {}", path.display()));
+    }
+    
+    // Use the processed database scanner
+    let dbs = processed::detection::scan_for_processed_dbs(&path, true);
+    
+    Ok(dbs)
+}
+
 // EWF Commands - Expert Witness Format implementation (E01/L01/Ex01/Lx01)
 #[tauri::command]
 async fn e01_v3_info(
@@ -1416,6 +1482,11 @@ pub fn run() {
             scan_directory,
             scan_directory_recursive,
             scan_directory_streaming,
+            // Path and discovery utilities
+            path_exists,
+            path_is_directory,
+            discover_evidence_files,
+            scan_for_processed_databases,
             e01_v3_info,
             e01_v3_verify,
             e01_verify_segments,

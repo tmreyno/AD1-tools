@@ -18,3 +18,7 @@ export { TextViewer } from "./TextViewer";
 // Report components
 export { ReportWizard } from "./report";
 export type { ForensicReport as ReportData, OutputFormat as ReportFormat } from "./report";
+
+// Project Setup
+export { default as ProjectSetupWizard } from "./ProjectSetupWizard";
+export type { ProjectLocations } from "./ProjectSetupWizard";
