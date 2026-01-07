@@ -5,7 +5,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ContainerInfo, DiscoveredFile, EwfInfo, Ad1Info, UfedInfo } from "../types";
+import type { ContainerInfo, DiscoveredFile } from "../types";
 
 // =============================================================================
 // Input Types (sent to backend)

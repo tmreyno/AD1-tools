@@ -215,7 +215,8 @@ const SEVERITIES: { value: Severity; label: string; color: string }[] = [
   { value: "Informational", label: "Info", color: "#6b7280" },
 ];
 
-const EVIDENCE_TYPES: { value: EvidenceType; label: string }[] = [
+/** Evidence type options for dropdowns - exported for extensions */
+export const EVIDENCE_TYPES: { value: EvidenceType; label: string }[] = [
   { value: "HardDrive", label: "Hard Drive" },
   { value: "SSD", label: "SSD" },
   { value: "USBDrive", label: "USB Drive" },
@@ -1405,7 +1406,7 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
-function detectEvidenceType(file: DiscoveredFile, info?: ContainerInfo): EvidenceType {
+function detectEvidenceType(file: DiscoveredFile, _info?: ContainerInfo): EvidenceType {
   const name = file.filename.toLowerCase();
   const type = file.container_type.toLowerCase();
   
